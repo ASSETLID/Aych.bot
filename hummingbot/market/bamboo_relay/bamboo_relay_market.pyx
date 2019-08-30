@@ -463,19 +463,20 @@ cdef class BambooRelayMarket(MarketBase):
 
                 # do not retrigger order events if order was already in that state previously
                 if not previous_is_cancelled and tracked_limit_order.is_cancelled:
-                    if (self._in_flight_cancels.get(tracked_limit_order.client_order_id, 0) >
-                            self._current_timestamp - self.CANCEL_EXPIRY_TIME):
-                        # This cancel was originated from this connector, and the cancel event should have been
-                        # emitted in the cancel_order() call already.
-                        del self._in_flight_cancels[tracked_limit_order.client_order_id]
-                    else:
-                        self.logger().info(f"The limit order {tracked_limit_order.client_order_id} has cancelled according "
-                                           f"to order status API.")
-                        self.c_expire_order(tracked_limit_order.client_order_id)
-                        self.c_trigger_event(
-                            self.MARKET_ORDER_CANCELLED_EVENT_TAG,
-                            OrderCancelledEvent(self._current_timestamp, tracked_limit_order.client_order_id)
-                        )
+                    pass
+                    # if (self._in_flight_cancels.get(tracked_limit_order.client_order_id, 0) >
+                    #         self._current_timestamp - self.CANCEL_EXPIRY_TIME):
+                    #     # This cancel was originated from this connector, and the cancel event should have been
+                    #     # emitted in the cancel_order() call already.
+                    #     del self._in_flight_cancels[tracked_limit_order.client_order_id]
+                    # else:
+                    #     self.logger().info(f"The limit order {tracked_limit_order.client_order_id} has cancelled according "
+                    #                        f"to order status API.")
+                    #     self.c_expire_order(tracked_limit_order.client_order_id)
+                    #     self.c_trigger_event(
+                    #         self.MARKET_ORDER_CANCELLED_EVENT_TAG,
+                    #         OrderCancelledEvent(self._current_timestamp, tracked_limit_order.client_order_id)
+                    #     )
                 elif not previous_is_expired and tracked_limit_order.is_expired:
                     self.logger().info(f"The limit order {tracked_limit_order.client_order_id} has expired according "
                                        f"to order status API.")
@@ -682,7 +683,7 @@ cdef class BambooRelayMarket(MarketBase):
         response_data = await self._api_request(http_method="post", url=url, data=data, headers={"User-Agent":"hummingbot"})
         return response_data
 
-    async def request_unsigned_limit_order(self, 
+    async def request_unsigned_limit_order(self,
                                            symbol: str, 
                                            trade_type: TradeType, 
                                            is_coordinated: bool, 
@@ -703,6 +704,7 @@ cdef class BambooRelayMarket(MarketBase):
             "price": price,
             "expiration": expires
         }
+        self.logger().info(f"The expiration ts in payload is is {expires} and current ts is {self._current_timestamp}")
         return await self._api_request(http_method="post", url=url, data=data, headers={"User-Agent":"hummingbot"})
 
     def get_order_hash_hex(self, unsigned_order: Dict[str, Any]) -> str:
@@ -820,6 +822,7 @@ cdef class BambooRelayMarket(MarketBase):
                                  price: str,
                                  expires: int) -> Tuple[str, ZeroExOrder]:
         url = f"{BAMBOO_RELAY_REST_ENDPOINT}{self._api_prefix}/orders"
+        self.logger().info(f"The expiration ts in payload is is {expires} and current ts is {self._current_timestamp}")
         unsigned_limit_order = await self.request_unsigned_limit_order(symbol=symbol,
                                                                        trade_type=trade_type,
                                                                        is_coordinated=self._use_coordinator,
