@@ -40,6 +40,7 @@ def main():
         "hummingbot.market.ddex",
         "hummingbot.market.huobi",
         "hummingbot.market.idex",
+        "hummingbot.market.tex",
         "hummingbot.market.radar_relay",
         "hummingbot.strategy",
         "hummingbot.strategy.arbitrage",
