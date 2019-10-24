@@ -105,6 +105,10 @@ class TEXAPIOrderBookDataSource():
             data: Dict[str, any] = await response.json()
             return data
 
+    async def listen_for_trades(self, ev_loop: asyncio.BaseEventLoop, output: asyncio.Queue):
+        # Not implemented yet
+        pass
+
     async def listen_for_order_book_diffs(self, ev_loop: asyncio.BaseEventLoop, output: asyncio.Queue):
         # Tex's API do not provide order book diffs yet. (i.e only snapshots)
         pass
