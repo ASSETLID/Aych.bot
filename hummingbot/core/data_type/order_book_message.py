@@ -6,7 +6,6 @@ from functools import total_ordering
 import pandas as pd
 from typing import Optional, List, Dict
 import time
-
 from hummingbot.core.data_type.order_book_row import OrderBookRow
 
 
@@ -515,7 +514,7 @@ class TEXOrderBookMessage(OrderBookMessage):
             if message_type is OrderBookMessageType.SNAPSHOT:
                 raise ValueError("timestamp must not be None when initializing snapshot messages.")
             timestamp = content["time"] * 1e-3
-        return super(DDEXOrderBookMessage, cls).__new__(
+        return super(TEXOrderBookMessage, cls).__new__(
             cls, message_type, content, timestamp=timestamp, *args, **kwargs
         )
 
@@ -533,11 +532,13 @@ class TEXOrderBookMessage(OrderBookMessage):
 
     @property
     def asks(self) -> List[OrderBookRow]:
-        raise NotImplementedError("TEX order book messages have different semantics.")
+        sell_orders = self.map_orders(False, self.content["sell_orders"])
+        return list(map(lambda order: OrderBookRow(order['price'], order['amount'], self.update_id), sell_orders))
 
     @property
     def bids(self) -> List[OrderBookRow]:
-        raise NotImplementedError("TEX order book messages have different semantics.")
+        buy_orders = self.map_orders(True, self.content["buy_orders"])
+        return list(map(lambda order: OrderBookRow(order['price'], order['amount'], self.update_id), buy_orders))
 
     @property
     def has_update_id(self) -> bool:
@@ -546,6 +547,18 @@ class TEXOrderBookMessage(OrderBookMessage):
     @property
     def has_trade_id(self) -> bool:
         return True
+
+    def map_orders(self, isBuy, orders) -> List[OrderBookRow]:
+        processed_orders = []
+        for order in orders:
+            processed_order = {}
+            filled_percentage = 1 - float(order['remaining_out']) / float(order['amount'])
+            amount_initial = float(order['amount_swapped']) if isBuy is True else float(order['amount'])
+            processed_order['amount'] = amount_initial - amount_initial * filled_percentage
+            processed_order['price'] = float(order['amount']) / float(order['amount_swapped']) if isBuy is True else float(order['amount_swapped']) / float(order['amount'])
+            processed_orders.append(processed_order)
+
+        return processed_orders
 
     def __eq__(self, other) -> bool:
         return self.type == other.type and self.timestamp == other.timestamp
