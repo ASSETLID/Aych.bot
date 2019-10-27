@@ -17,7 +17,7 @@ from hummingbot.core.data_type.remote_api_order_book_data_source import RemoteAP
 from hummingbot.core.utils.async_utils import safe_ensure_future
 from hummingbot.market.tex.tex_api_order_book_data_source import TEXAPIOrderBookDataSource
 from hummingbot.core.data_type.order_book import OrderBook
-from hummingbot.core.data_type.order_book_message import TEXOrderBookMessage, TEXOrderBookMessageType
+from hummingbot.core.data_type.order_book_message import TEXOrderBookMessage, OrderBookMessageType
 
 
 class TEXOrderBookTracker(OrderBookTracker):
@@ -58,12 +58,12 @@ class TEXOrderBookTracker(OrderBookTracker):
 
     async def start(self):
         await super().start()
-        self._order_book_trade_listener_task = safe_ensure_future(
-            self.data_source.listen_for_trades(self._ev_loop, self._order_book_trade_stream)
-        )
-        self._order_book_diff_listener_task = safe_ensure_future(
-            self.data_source.listen_for_order_book_diffs(self._ev_loop, self._order_book_diff_stream)
-        )
+        # self._order_book_trade_listener_task = safe_ensure_future(
+        #     self.data_source.listen_for_trades(self._ev_loop, self._order_book_trade_stream)
+        # )
+        # self._order_book_diff_listener_task = safe_ensure_future(
+        #     self.data_source.listen_for_order_book_diffs(self._ev_loop, self._order_book_diff_stream)
+        # )
         self._order_book_snapshot_listener_task = safe_ensure_future(
             self.data_source.listen_for_order_book_snapshots(self._ev_loop, self._order_book_snapshot_stream)
         )
@@ -89,7 +89,7 @@ class TEXOrderBookTracker(OrderBookTracker):
                 else:
                     message = await message_queue.get()
 
-                if message.type is TEXOrderBookMessageType.SNAPSHOT:
+                if message.type is OrderBookMessageType.SNAPSHOT:
                     order_book.apply_snapshot(message.bids, message.asks, message.update_id)
                     self.logger().debug("Processed order book snapshot for %s.", symbol)
             except asyncio.CancelledError:
