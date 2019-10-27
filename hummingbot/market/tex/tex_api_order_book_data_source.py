@@ -13,21 +13,26 @@ import time
 from hummingbot.logger import HummingbotLogger
 from hummingbot.market.tex.tex_order_book import TEXOrderBook
 from hummingbot.core.data_type.order_book_message import TEXOrderBookMessage
+from hummingbot.core.data_type.order_book_tracker_entry import OrderBookTrackerEntry
+from hummingbot.core.data_type.order_book import OrderBook
+from hummingbot.core.data_type.order_book_tracker_data_source import OrderBookTrackerDataSource
 TEX_REST_URL = "https://rinkeby.liquidity.network"
 
 
-class TEXAPIOrderBookDataSource():
+class TEXAPIOrderBookDataSource(OrderBookTrackerDataSource):
 
     def __init__(self, symbols: Optional[List[str]] = None):
         super().__init__()
         self._symbols: Optional[List[str]] = symbols
         self._get_tracking_pair_done_event: asyncio.Event = asyncio.Event()
 
+    _baobds_logger: Optional[HummingbotLogger] = None
+
     @classmethod
     def logger(cls) -> HummingbotLogger:
-        if cls._iaobds_logger is None:
-            cls._iaobds_logger = logging.getLogger(__name__)
-        return cls._iaobds_logger
+        if cls._baobds_logger is None:
+            cls._baobds_logger = logging.getLogger(__name__)
+        return cls._baobds_logger
 
     @classmethod
     async def get_active_exchange_markets(cls) -> pd.DataFrame:
@@ -86,6 +91,39 @@ class TEXAPIOrderBookDataSource():
         else:
             trading_pairs: List[str] = self._symbols
         return trading_pairs
+
+    async def get_tracking_pairs(self) -> Dict[str, OrderBookTrackerEntry]:
+        # Get the currently active markets
+        async with aiohttp.ClientSession() as client:
+            trading_pairs: List[str] = await self.get_trading_pairs()
+            retval: Dict[str, OrderBookTrackerEntry] = {}
+            number_of_pairs: int = len(trading_pairs)
+            for index, trading_pair in enumerate(trading_pairs):
+                try:
+                    snapshot: Dict[str, any] = await self.get_snapshot(client, trading_pair)
+                    snapshot_timestamp: float = time.time()
+                    snapshot_msg: TEXOrderBookMessage = TEXOrderBook.snapshot_message_from_exchange(
+                        snapshot,
+                        snapshot_timestamp,
+                        {"symbol": trading_pair}
+                    )
+                    tex_order_book: OrderBook = self.order_book_create_function()
+                    print(snapshot_msg)
+                    tex_order_book.apply_snapshot(snapshot_msg.bids, snapshot_msg.asks, snapshot_msg.update_id)
+
+                    retval[trading_pair] = OrderBookTrackerEntry(
+                        trading_pair,
+                        snapshot_timestamp,
+                        tex_order_book,
+                    )
+
+                    self.logger().info(f"Initialized order book for {trading_pair}. "
+                                       f"{index+1}/{number_of_pairs} completed.")
+                    await asyncio.sleep(1.0)
+                except Exception:
+                    self.logger().error(f"Error initializing order book for {trading_pair}.", exc_info=True)
+                    await asyncio.sleep(5.0)
+            return retval
 
     async def get_snapshot(self, client: aiohttp.ClientSession, trading_pair: str) -> Dict[str, any]:
         active_markets = await self.get_active_exchange_markets()

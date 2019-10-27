@@ -33,7 +33,8 @@ EXCHANGES = {
     "idex",
     "radar_relay",
     "dolomite",
-    "bittrex"
+    "bittrex",
+    "tex"
 }
 
 DEXES = {
@@ -41,7 +42,8 @@ DEXES = {
     "ddex",
     "idex",
     "radar_relay",
-    "dolomite"
+    "dolomite",
+    "tex"
 }
 
 STRATEGIES: List[str] = get_strategy_list()
@@ -54,8 +56,14 @@ EXAMPLE_PAIRS = {
     "bamboo_relay": "ZRX-WETH",
     "coinbase_pro": "ETH-USDC",
     "dolomite": "WETH-DAI",
+<<<<<<< HEAD
     "huobi": "ETH-USDT",
     "bittrex": "ZRX-ETH"
+=======
+    "huobi": "ethusdt",
+    "bittrex": "ZRX-ETH",
+    "tex": "fLQD-fETH"
+>>>>>>> Test Add Integration tests for orderbook tracker
 }
 
 EXAMPLE_ASSETS = {
