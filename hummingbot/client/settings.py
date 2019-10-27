@@ -33,7 +33,8 @@ EXCHANGES = {
     "idex",
     "radar_relay",
     "dolomite",
-    "bittrex"
+    "bittrex",
+    "tex"
 }
 
 DEXES = {
@@ -41,7 +42,8 @@ DEXES = {
     "ddex",
     "idex",
     "radar_relay",
-    "dolomite"
+    "dolomite",
+    "tex"
 }
 
 STRATEGIES: List[str] = get_strategy_list()
@@ -55,7 +57,8 @@ EXAMPLE_PAIRS = {
     "coinbase_pro": "ETH-USDC",
     "dolomite": "WETH-DAI",
     "huobi": "ethusdt",
-    "bittrex": "ZRX-ETH"
+    "bittrex": "ZRX-ETH",
+    "tex": "fLQD-fETH"
 }
 
 EXAMPLE_ASSETS = {

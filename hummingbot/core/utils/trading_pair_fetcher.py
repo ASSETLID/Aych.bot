@@ -183,6 +183,10 @@ class TradingPairFetcher:
                         # Do nothing if the request fails -- there will be no autocomplete for dolomite trading pairs
                 return []
 
+    @staticmethod
+    def fetch_tex_trading_pairs() -> List[str]:
+        return ["fLQD-fETH", "fLQD-fCO2", "fCO2-fETH", "fFCO-fETH", "fLQD-fFCO", "fFCO-fCO2"]
+
     async def fetch_all(self):
         binance_trading_pairs = await self.fetch_binance_trading_pairs()
         ddex_trading_pairs = await self.fetch_ddex_trading_pairs()
@@ -193,6 +197,7 @@ class TradingPairFetcher:
         huobi_trading_pairs = await self.fetch_huobi_trading_pairs()
         idex_trading_pairs = await self.fetch_idex_trading_pairs()
         bittrex_trading_pairs = await self.fetch_bittrex_trading_pairs()
+        tex_trading_pairs = self.fetch_tex_trading_pairs()
         self.trading_pairs = {
             "binance": binance_trading_pairs,
             "dolomite": dolomite_trading_pairs,
@@ -203,5 +208,6 @@ class TradingPairFetcher:
             "coinbase_pro": coinbase_pro_trading_pairs,
             "huobi": huobi_trading_pairs,
             "bittrex": bittrex_trading_pairs,
+            "tex": tex_trading_pairs
         }
         self.ready = True
