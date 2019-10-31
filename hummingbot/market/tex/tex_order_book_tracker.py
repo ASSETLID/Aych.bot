@@ -36,7 +36,6 @@ class TEXOrderBookTracker(OrderBookTracker):
 
         self._order_book_diff_stream: asyncio.Queue = asyncio.Queue()
         self._order_book_snapshot_stream: asyncio.Queue = asyncio.Queue()
-
         self._ev_loop: asyncio.BaseEventLoop = asyncio.get_event_loop()
         self._data_source: Optional[OrderBookTrackerDataSource] = None
         self._saved_message_queues: Dict[str, Deque[TEXOrderBookMessage]] = defaultdict(lambda: deque(maxlen=1000))
