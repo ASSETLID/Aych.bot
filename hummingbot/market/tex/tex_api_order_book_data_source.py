@@ -60,6 +60,7 @@ class TEXAPIOrderBookDataSource(OrderBookTrackerDataSource):
         }]
 
         data = []
+        # TODO: Change implementation + calculate volume/USDVolume
         for trading_pair in pairs:
             if "-" in trading_pair:
                 quote_asset = trading_pair.split("-")[1][1:4]
@@ -76,7 +77,9 @@ class TEXAPIOrderBookDataSource(OrderBookTrackerDataSource):
                         "baseAsset": base_asset,
                         "quoteAsset": quote_asset,
                         "baseAddress": base_address,
-                        "quoteAddress": quote_address
+                        "quoteAddress": quote_address,
+                        "volume": 1000,
+                        "USDVolume": 1000
                     })
         return data
 
