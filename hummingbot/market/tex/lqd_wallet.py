@@ -37,7 +37,9 @@ class LQDWallet():
 
     @property
     def latest_eon_number(self) -> int:
-        return self._latest_eon_number
+        eon_numbers = self.eons.keys()
+        if len(eon_numbers) == 0:
+            return eon_numbers[len(eon_numbers) - 1]
 
     @property
     def token_address(self) -> str:
@@ -59,41 +61,51 @@ class LQDWallet():
     def eons(self) -> Dict[int, LQDEon]:
         return self._eons
 
-    @property
     def starting_balance(self, eon_number: int) -> float:
         merkle_proof = self.eons[eon_number].merkle_proof
+        if not merkle_proof:
+            return 0
         return merkle_proof['right'] - merkle_proof['left']
 
-    @property
-    def balance(self, eon_number: int) -> float:
+    def spent_and_gained(self, eon_number: int) -> Dict[str, float]:
+        spent = 0
+        gained = 0
         transfers = self.eons[eon_number].transfers
-        deposits = self.eons[eon_number].deposits
-        withdrawals = self.eons[eon_number].withdrawals
-        deposits_amount = functools.reduce(lambda total, deposit: total + deposit['amount'], deposits)
-        withdrawals_amount = functools.reduce(lambda total, withdrawal: total + withdrawal['amount'], withdrawals)
-
-        transfers_amount_delta = 0
         for transfer in transfers:
             is_sender = is_same_hex(transfer['wallet']['address'], self.wallet_address) and \
                 is_same_hex(transfer['wallet']['token'], self.token_address)
             is_swap = transfer['amount_swapped']
             if is_sender:
                 if is_swap:
-                    transfers_amount_delta -= transfer['matched_amounts']['matched_out']
+                    # TODO: Should only add the current eon matched out
+                    spent += transfer['matched_amounts']['matched_out']
                 else:
-                    transfers_amount_delta -= transfer['amount']
+                    spent += transfer['amount']
             else:
                 if is_swap:
-                    transfers_amount_delta -= transfer['matched_amounts']['matched_in']
+                    # TODO: Should only add the current eon matched in
+                    gained += transfer['matched_amounts']['matched_in']
                 else:
-                    transfers_amount_delta += transfer['amount']
+                    gained += transfer['amount']
 
-        return self.starting_balance + deposits_amount + transfers_amount_delta - withdrawals_amount
+        return {'spent': spent, 'gained': gained}
 
-    @property
-    def latest_wallet_state(self):
+    def balance(self, eon_number: int) -> float:
+        deposits = self.eons[eon_number].deposits
+        withdrawals = self.eons[eon_number].withdrawals
+        deposits_amount = functools.reduce(lambda total, deposit: total + deposit['amount'], deposits)
+        withdrawals_amount = functools.reduce(lambda total, withdrawal: total + withdrawal['amount'], withdrawals)
+        state_amount = self.spent_and_gained(eon_number)
+        return self.starting_balance(eon_number) + state_amount['gained'] - \
+            state_amount['spent'] + deposits_amount - withdrawals_amount
+
+    def latest_wallet_state(self, state_type: str):
         transfers = self.eons[self.latest_eon_number].transfers
         latest_transfer = transfers(len(transfers) - 1)
+
+        if state_type:
+            return latest_transfer[state_type]
+
         is_sender = is_same_hex(latest_transfer['wallet']['address'], self.wallet_address) and \
             is_same_hex(latest_transfer['wallet']['token'], self.token_address)
 
@@ -131,7 +143,8 @@ class LQDWallet():
 
         return Web3.soliditySha3(['bytes32', 'bytes32', 'uint64', 'uint256', 'uint256', 'uint256', 'uint256'],
                                  [sender_token_hash, recipient_token_hash, transfer['recipient_trail_identifier'],
-                                  transfer['amount'], transfer['amount_swapped'], self.starting_balance, transfer['nonce']])
+                                  transfer['amount'], transfer['amount_swapped'],
+                                  self.starting_balance(transfer['eon_number']), transfer['nonce']])
 
     def transfer_hash(self, transfer) -> str:
         if transfer['is_padding']:
@@ -142,6 +155,18 @@ class LQDWallet():
             return self.swap_transfer_hash(transfer)
         else:
             return self.normal_transfer_hash(transfer)
+
+    def active_state_hash(self) -> str:
+        contract_address_hash = Web3.soliditySha3(['address'], [self.contract_address])
+        token_address_hash = Web3.soliditySha3(['address'], [self.token_address])
+        wallet_address_hash = Web3.soliditySha3(['address'], [self.wallet_address])
+        transaction_set_hash = self.construct_merkle_tree(self.eons[self.latest_eon_number].transfers)['hash']
+        state_amount = self.spent_and_gained(self.latest_eon_number)
+        return Web3.soliditySha3(['bytes32', 'bytes32', 'bytes32', 'uint64', 'uint256',
+                                  'bytes32', 'uint256', 'uint256'],
+                                 [contract_address_hash, token_address_hash, wallet_address_hash,
+                                  self.trail_identifier, self.latest_eon_number, transaction_set_hash,
+                                  state_amount['spent'], state_amount['gained']])
 
     def construct_merkle_tree(self, transfers) -> str:
         transfers_count = len(transfers)
