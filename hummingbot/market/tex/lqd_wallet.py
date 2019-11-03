@@ -1,7 +1,8 @@
 from typing import (Dict)
 from enum import Enum
 from hummingbot.market.tex.tex_utils import (
-    is_same_hex
+    is_same_hex,
+    next_power_of_2
 )
 from web3 import Web3
 from hummingbot.market.tex.lqd_eon import LQDEon
@@ -168,7 +169,18 @@ class LQDWallet():
                                   self.trail_identifier, self.latest_eon_number, transaction_set_hash,
                                   state_amount['spent'], state_amount['gained']])
 
-    def construct_merkle_tree(self, transfers) -> str:
+    def calculate_tx_set_hash(self, transfers) -> str:
+        # filter out incoming passive transfers
+        transfers = filter(lambda transfer: not (transfer['passive'] or
+                                                 is_same_hex(transfer['recipient']['address'],
+                                                             self.wallet_address)), transfers)
+        if len(transfers) > 0:
+            padding_length = next_power_of_2(len(transfers))
+            transfers += [{'is_padding': True}] * padding_length
+
+        return self.construct_merkle_tree(transfers)['hash']
+
+    def construct_merkle_tree(self, transfers):
         transfers_count = len(transfers)
 
         if transfers_count == 0:
