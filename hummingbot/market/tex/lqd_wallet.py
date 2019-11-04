@@ -1,5 +1,6 @@
 from typing import (Dict)
 from enum import Enum
+import asyncio
 from hummingbot.market.tex.tex_utils import (
     is_same_hex,
     next_power_of_2
@@ -175,7 +176,7 @@ class LQDWallet():
                                                  is_same_hex(transfer['recipient']['address'],
                                                              self.wallet_address)), transfers)
         if len(transfers) > 0:
-            padding_length = next_power_of_2(len(transfers))
+            padding_length = next_power_of_2(len(transfers)) - len(transfers)
             transfers += [{'is_padding': True}] * padding_length
 
         return self.construct_merkle_tree(transfers)['hash']
@@ -205,3 +206,22 @@ class LQDWallet():
         right_child['parent'] = result
 
         return result
+
+    async def ws_notification_consumer(self, stream: asyncio.Queue):
+        while True:
+            try:
+                msg = await stream.get()
+                print(f"Consuming -> {msg}")
+
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                print(
+                    f"Unexpected error routing order book messages.",
+                    exc_info=True,
+                    app_warning_msg=f"Unexpected error routing order book messages. Retrying after 5 seconds."
+                )
+                await asyncio.sleep(5.0)
+
+    def state_updater(self, msg):
+        pass
