@@ -98,10 +98,11 @@ class LQDWalletSync():
 
     def ws_stream_router(self, msg):
         decoded_msg = ujson.loads(msg)
-        msg_type = decoded_msg['data']['type']
-
-        address = ''
-        token = ''
+        msg_data = decoded_msg['data']
+        msg_object_data = msg_data['data']
+        stream_type = msg_data['type']
+        msg_type = msg_object_data['type']
+        wallet_address = stream_type[6:]
         transfer_model_notifications = [WSNotificationType.INCOMING_TRANSFER,
                                         WSNotificationType.INCOMING_RECEIPT,
                                         WSNotificationType.INCOMING_CONFIRMATION,
@@ -116,15 +117,15 @@ class LQDWalletSync():
                                       WSNotificationType.CHECKPOINT_CREATED]
 
         if msg_type in transfer_model_notifications:
-            return
-        elif msg_type in others_model_notifications:
-            return
-        else:
-            # Unknown WS Notification type
-            return
+            sender_token = msg_object_data['wallet']['token']
+            recipient_token = msg_object_data['recipient']['token']
+            if sender_token != recipient_token:
+                self._state_streams[f"{recipient_token}/{wallet_address}"].put_nowait(msg_data)
+            self._state_streams[f"{sender_token}/{wallet_address}"].put_nowait(msg_data)
 
-        print(f"Appending -> {msg}")
-        self._state_streams[f"{token}/{address}"].put_nowait(decoded_msg)
+        elif msg_type in others_model_notifications:
+            token = msg_object_data['token']
+            self._state_streams[f"{token}/{wallet_address}"].put_nowait(msg_data)
 
     async def subscribe_wallet(self, wallet_address: str, token_address: str) -> asyncio.Queue:
         # TODO: Send subscription ws message
