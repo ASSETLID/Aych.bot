@@ -7,8 +7,8 @@ from hummingbot.market.tex.tex_utils import (
 )
 from web3 import Web3
 from hummingbot.market.tex.lqd_eon import LQDEon
+from hummingbot.market.tex.lqd_wallet_sync import WSNotificationType
 import functools
-
 EMPTY_HASH = '0x0000000000000000000000000000000000000000000000000000000000000000'
 
 
@@ -29,19 +29,22 @@ class LQDWallet():
                  contract_address: str,
                  eon_number: int,
                  trail_identifier: int,
-                 eons: Dict[int, LQDEon]):
-        self._eons = eons
-        self._latest_eon_number = eon_number
+                 current_eon: LQDEon,
+                 previous_eon: LQDEon):
+        self._current_eon = current_eon
+        self._previous_eon = previous_eon
         self._token_address = token_address
         self._wallet_address = wallet_address
         self._contract_address = contract_address
         self._trail_identifier = trail_identifier
 
     @property
-    def latest_eon_number(self) -> int:
-        eon_numbers = self.eons.keys()
-        if len(eon_numbers) == 0:
-            return eon_numbers[len(eon_numbers) - 1]
+    def current_eon(self) -> LQDEon:
+        return self._current_eon
+
+    @property
+    def previous_eon(self) -> LQDEon:
+        return self._previous_eon
 
     @property
     def token_address(self) -> str:
@@ -59,20 +62,16 @@ class LQDWallet():
     def trail_identifier(self) -> int:
         return self._trail_identifier
 
-    @property
-    def eons(self) -> Dict[int, LQDEon]:
-        return self._eons
-
-    def starting_balance(self, eon_number: int) -> float:
-        merkle_proof = self.eons[eon_number].merkle_proof
+    def starting_balance(self, eon: LQDEon) -> float:
+        merkle_proof = eon.merkle_proof
         if not merkle_proof:
             return 0
         return merkle_proof['right'] - merkle_proof['left']
 
-    def spent_and_gained(self, eon_number: int) -> Dict[str, float]:
+    def spent_and_gained(self, eon: LQDEon) -> Dict[str, float]:
         spent = 0
         gained = 0
-        transfers = self.eons[eon_number].transfers
+        transfers = eon.transfers
         for transfer in transfers:
             is_sender = is_same_hex(transfer['wallet']['address'], self.wallet_address) and \
                 is_same_hex(transfer['wallet']['token'], self.token_address)
@@ -92,18 +91,19 @@ class LQDWallet():
 
         return {'spent': spent, 'gained': gained}
 
-    def balance(self, eon_number: int) -> float:
-        deposits = self.eons[eon_number].deposits
-        withdrawals = self.eons[eon_number].withdrawals
+    def balance(self, eon: LQDEon) -> float:
+        deposits = eon.deposits
+        withdrawals = eon.withdrawals
         deposits_amount = functools.reduce(lambda total, deposit: total + deposit['amount'], deposits)
         withdrawals_amount = functools.reduce(lambda total, withdrawal: total + withdrawal['amount'], withdrawals)
-        state_amount = self.spent_and_gained(eon_number)
-        return self.starting_balance(eon_number) + state_amount['gained'] - \
+        state_amount = self.spent_and_gained(eon)
+        return self.starting_balance(eon) + state_amount['gained'] - \
             state_amount['spent'] + deposits_amount - withdrawals_amount
 
     def latest_wallet_state(self, state_type: str):
-        transfers = self.eons[self.latest_eon_number].transfers
-        latest_transfer = transfers(len(transfers) - 1)
+        transfers = self.current_eon.transfers
+        # TODO: If no transfers -> Empty active state
+        latest_transfer = transfers[len(transfers) - 1]
 
         if state_type:
             return latest_transfer[state_type]
@@ -146,7 +146,7 @@ class LQDWallet():
         return Web3.soliditySha3(['bytes32', 'bytes32', 'uint64', 'uint256', 'uint256', 'uint256', 'uint256'],
                                  [sender_token_hash, recipient_token_hash, transfer['recipient_trail_identifier'],
                                   transfer['amount'], transfer['amount_swapped'],
-                                  self.starting_balance(transfer['eon_number']), transfer['nonce']])
+                                  self.starting_balance(self.current_eon), transfer['nonce']])
 
     def transfer_hash(self, transfer) -> str:
         if transfer['is_padding']:
@@ -211,6 +211,7 @@ class LQDWallet():
         while True:
             try:
                 msg = await stream.get()
+                self.state_updater(msg)
                 print(f"Consuming -> {msg}")
 
             except asyncio.CancelledError:
@@ -223,5 +224,51 @@ class LQDWallet():
                 )
                 await asyncio.sleep(5.0)
 
+    # Updating is done in place by overriding (Check concurrency issues)
     def state_updater(self, msg):
-        pass
+        msg_type = msg['type']
+        transfer_model_notifications = [WSNotificationType.INCOMING_TRANSFER,
+                                        WSNotificationType.INCOMING_RECEIPT,
+                                        WSNotificationType.INCOMING_CONFIRMATION,
+                                        WSNotificationType.INCOMING_TIMEOUT,
+                                        WSNotificationType.MATCHED_SWAP,
+                                        WSNotificationType.FINALIZED_SWAP,
+                                        WSNotificationType.CANCELLED_SWAP]
+
+        if msg_type in transfer_model_notifications:
+            transfer_update = msg['data']
+            transfer_found = False
+            for i, transfer in enumerate(self.current_eon.transfers):
+                if transfer['id'] == transfer_update['id']:
+                    self.current_eon.transfers[i] = transfer_update
+                    transfer_found = True
+                    break
+            if not transfer_found:
+                self.current_eon.transfers.append(transfer_update)
+        elif msg_type == WSNotificationType.REGISTERED_WALLET:
+            registration_data = msg['data']
+            self._trail_identifier = registration_data['trail_identifier']
+        elif msg_type == WSNotificationType.CONFIRMED_DEPOSIT:
+            deposit = msg['data']
+            self.current_eon.deposits.append(deposit)
+        elif msg_type == WSNotificationType.CONFIRMED_WITHDRAWAL:
+            withdrawal = msg['data']
+            self.current_eon.withdrawals.append(withdrawal)
+        elif msg_type == WSNotificationType.CHECKPOINT_CREATED:
+            self.previous_eon = self.current_eon
+            wallet_data = msg['data']
+            current_merkle_proof = {}
+            current_eon_number = -1
+            for merkle_proof in enumerate(wallet_data['merkle_proofs']):
+                if merkle_proof['eon_number'] > current_eon_number:
+                    current_merkle_proof = merkle_proof
+                    current_eon_number = merkle_proof['eon_number']
+
+            self.current_eon.merkle_proof = current_merkle_proof
+            self.current_eon.eon_number = current_eon_number
+            self.current_eon.transfers = [transfer for transfer in wallet_data['transfers']
+                                          if transfer['eon_number'] == current_eon_number]
+            self.current_eon.deposits = [deposit for deposit in wallet_data['deposits']
+                                         if deposit['eon_number'] == current_eon_number]
+            self.current_eon.withdrawals = [withdrawal for withdrawal in wallet_data['withdrawals']
+                                            if withdrawal['eon_number'] == current_eon_number]
