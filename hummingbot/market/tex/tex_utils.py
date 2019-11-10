@@ -29,7 +29,7 @@ def generate_state_checksum(contract_address: str, token_address: str, wallet_ad
 
 
 def sign_data(data, wallet: Web3Wallet):
-    signature = w3.eth.account.sign_message(data, wallet.private_key)
+    signature = w3.eth.account.sign_message(lqd_hash_wrapper(data), wallet.private_key)
     return f"{signature['r']}{signature['s']}{signature['v']}"
 
 
@@ -39,3 +39,7 @@ def is_same_hex(hex1: str, hex2: str) -> bool:
 
 def next_power_of_2(x):
     return 1 if x == 0 else 2**(x - 1).bit_length()
+
+
+def lqd_hash_wrapper(msg):
+    return Web3.soliditySha3('\x19Liquidity.Network Authorization:\n32' + msg)
