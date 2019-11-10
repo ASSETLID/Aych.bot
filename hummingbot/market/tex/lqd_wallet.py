@@ -30,13 +30,16 @@ class LQDWallet():
                  eon_number: int,
                  trail_identifier: int,
                  current_eon: LQDEon,
-                 previous_eon: LQDEon):
+                 previous_eon: LQDEon,
+                 ws_stream: asyncio.Queue):
         self._current_eon = current_eon
         self._previous_eon = previous_eon
         self._token_address = token_address
         self._wallet_address = wallet_address
         self._contract_address = contract_address
         self._trail_identifier = trail_identifier
+        self._ws_stream = ws_stream
+        self._ws_confirmations_stream = asyncio.Queue()
 
     @property
     def current_eon(self) -> LQDEon:
@@ -61,6 +64,10 @@ class LQDWallet():
     @property
     def trail_identifier(self) -> int:
         return self._trail_identifier
+
+    @property
+    def ws_confirmations_stream(self):
+        return self._ws_confirmations_stream
 
     def starting_balance(self, eon: LQDEon) -> float:
         merkle_proof = eon.merkle_proof
@@ -207,10 +214,10 @@ class LQDWallet():
 
         return result
 
-    async def ws_notification_consumer(self, stream: asyncio.Queue):
+    async def ws_notification_consumer(self):
         while True:
             try:
-                msg = await stream.get()
+                msg = await self._ws_stream.get()
                 self.state_updater(msg)
                 print(f"Consuming -> {msg}")
 
@@ -248,6 +255,7 @@ class LQDWallet():
         elif msg_type == WSNotificationType.REGISTERED_WALLET:
             registration_data = msg['data']
             self._trail_identifier = registration_data['trail_identifier']
+            self._ws_confirmations_stream.put_nowait(registration_data)
         elif msg_type == WSNotificationType.CONFIRMED_DEPOSIT:
             deposit = msg['data']
             self.current_eon.deposits.append(deposit)
