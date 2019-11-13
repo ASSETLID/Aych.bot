@@ -22,6 +22,7 @@ from hummingbot.market.paper_trade import create_paper_trade_market
 from hummingbot.market.radar_relay.radar_relay_market import RadarRelayMarket
 from hummingbot.market.bamboo_relay.bamboo_relay_market import BambooRelayMarket
 from hummingbot.market.idex.idex_market import IDEXMarket
+from hummingbot.market.tex.tex_market import TEXMarket
 from hummingbot.market.dolomite.dolomite_market import DolomiteMarket
 from hummingbot.model.sql_connection_manager import SQLConnectionManager
 
@@ -270,6 +271,15 @@ class HummingbotApplication(*commands):
                 except Exception as e:
                     self.logger().error(str(e))
 
+            elif market_name == "tex" and self.wallet:
+                market = TEXMarket(
+                    wallet=self.wallet,
+                    ethereum_rpc_url=ethereum_rpc_url,
+                    poll_interval = 5.0,
+                    order_book_tracker_data_source_type=OrderBookTrackerDataSourceType.EXCHANGE_API,
+                    symbols=symbols,
+                    trading_required=self._trading_required)
+
             elif market_name == "binance":
                 binance_api_key = global_config_map.get("binance_api_key").value
                 binance_api_secret = global_config_map.get("binance_api_secret").value
@@ -337,6 +347,7 @@ class HummingbotApplication(*commands):
                                        order_book_tracker_data_source_type=OrderBookTrackerDataSourceType.EXCHANGE_API,
                                        symbols=symbols,
                                        trading_required=self._trading_required)
+
             else:
                 raise ValueError(f"Market name {market_name} is invalid.")
 
