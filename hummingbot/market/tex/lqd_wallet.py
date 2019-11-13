@@ -32,7 +32,10 @@ class LQDWallet():
                  current_eon: LQDEon,
                  previous_eon: LQDEon,
                  ws_stream: asyncio.Queue):
-        self._current_eon = current_eon
+        if not current_eon:
+            self._current_eon = LQDEon([], [], [], None, eon_number)
+        else:
+            self._current_eon = current_eon
         self._previous_eon = previous_eon
         self._token_address = token_address
         self._wallet_address = wallet_address
@@ -253,7 +256,7 @@ class LQDWallet():
             if not transfer_found:
                 self.current_eon.transfers.append(transfer_update)
         elif msg_type == WSNotificationType.REGISTERED_WALLET:
-            registration_data = msg['data']
+            registration_data = msg['data']['registration']
             self._trail_identifier = registration_data['trail_identifier']
             self._ws_confirmations_stream.put_nowait(registration_data)
         elif msg_type == WSNotificationType.CONFIRMED_DEPOSIT:
