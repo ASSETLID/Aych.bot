@@ -4,7 +4,7 @@ from hummingbot.market.market_base cimport MarketBase
 from hummingbot.core.data_type.transaction_tracker cimport TransactionTracker
 
 
-cdef class TexMarket(MarketBase):
+cdef class TEXMarket(MarketBase):
     cdef:
         object _tex_client
         object _ev_loop
@@ -26,3 +26,8 @@ cdef class TexMarket(MarketBase):
         public object _trading_rules_polling_task
         object _async_scheduler
         object _set_server_time_offset_task
+        object _w3
+        object _wallet
+        object _network_id
+        double _last_update_balances_timestamp
+        object _shared_client

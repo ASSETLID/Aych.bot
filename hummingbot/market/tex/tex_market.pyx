@@ -24,7 +24,7 @@ from hummingbot.core.utils.async_utils import (
     safe_ensure_future,
     safe_gather,
 )
-from hummingbot.market.tex.tedx_api_order_book_data_source import TEXAPIOrderBookDataSource
+from hummingbot.market.tex.tex_api_order_book_data_source import TEXAPIOrderBookDataSource
 from hummingbot.logger import HummingbotLogger
 from hummingbot.core.event.events import (
     MarketEvent,
@@ -62,6 +62,8 @@ s_logger = None
 
 s_decimal_0 = Decimal(0)
 NETWORK= 'RINKEBY'
+ETH_RPC_URL = 'https://rinkeby.infura.io/v3/9aed27c49d81418687a11e11aa00be0a'
+UPDATE_BALANCES_INTERVAL = 5
 cdef class TEXMarketTransactionTracker(TransactionTracker):
     cdef:
         TEXMarket _owner
@@ -104,9 +106,11 @@ cdef class TEXMarket(MarketBase):
         self._data_source_type = order_book_tracker_data_source_type
         self._status_polling_task = None
         self._order_tracker_task = None
+        self._shared_client = None
         self._async_scheduler = AsyncCallScheduler(call_interval=0.5)
         self._last_pull_timestamp = 0
-        self._w3 = Web3(Web3.HTTPProvider(ethereum_rpc_url))
+        self.logger().info(f"RPC ->> {ETH_RPC_URL}")
+        self._w3 = Web3(Web3.HTTPProvider(ETH_RPC_URL))
         self._wallet = wallet
         self._network_id = int(self._w3.net.version)
 
@@ -198,7 +202,7 @@ cdef class TEXMarket(MarketBase):
     async def _update_balances(self):
         cdef:
             double current_timestamp = self._current_timestamp
-        if current_timestamp - self._last_update_balances_timestamp > self.UPDATE_BALANCES_INTERVAL or len(self._account_balances) > 0:
+        if current_timestamp - self._last_update_balances_timestamp > UPDATE_BALANCES_INTERVAL or len(self._account_balances) > 0:
             available_balances, total_balances = await self._get_lqd_balances()
             self._account_available_balances = available_balances
             self._account_balances = total_balances

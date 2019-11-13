@@ -13,7 +13,7 @@ async def get_current_eon():
             if response.status != 200:
                 raise IOError(f"Error while fetching the latest eon number" f"HTTP status is {response.status}.")
             data: Dict[str, any] = await response.json()
-            return data.latest.eon_number
+            return data["latest"]["eon_number"]
 
 
 async def post_admission_request(token_address: str, wallet_address: str, signature: str):

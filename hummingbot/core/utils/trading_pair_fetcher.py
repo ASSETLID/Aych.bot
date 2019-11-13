@@ -203,6 +203,7 @@ class TradingPairFetcher:
 
     @staticmethod
     def fetch_tex_trading_pairs() -> List[str]:
+        # TODO: Fetch from api
         return ["fLQD-fETH", "fLQD-fCO2", "fCO2-fETH", "fFCO-fETH", "fLQD-fFCO", "fFCO-fCO2"]
 
     async def fetch_all(self):
