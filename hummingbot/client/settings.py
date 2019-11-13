@@ -56,14 +56,9 @@ EXAMPLE_PAIRS = {
     "bamboo_relay": "ZRX-WETH",
     "coinbase_pro": "ETH-USDC",
     "dolomite": "WETH-DAI",
-<<<<<<< HEAD
     "huobi": "ETH-USDT",
-    "bittrex": "ZRX-ETH"
-=======
-    "huobi": "ethusdt",
     "bittrex": "ZRX-ETH",
     "tex": "fLQD-fETH"
->>>>>>> Test Add Integration tests for orderbook tracker
 }
 
 EXAMPLE_ASSETS = {
