@@ -27,15 +27,11 @@ class LQDWallet():
                  token_address: str,
                  wallet_address: str,
                  contract_address: str,
-                 eon_number: int,
                  trail_identifier: int,
                  current_eon: LQDEon,
                  previous_eon: LQDEon,
                  ws_stream: asyncio.Queue):
-        if not current_eon:
-            self._current_eon = LQDEon([], [], [], None, eon_number)
-        else:
-            self._current_eon = current_eon
+        self._current_eon = current_eon
         self._previous_eon = previous_eon
         self._token_address = token_address
         self._wallet_address = wallet_address
