@@ -47,9 +47,12 @@ from hummingbot.market.market_base import (
     s_decimal_NaN)
 from hummingbot.market.tex.lqd_wallet import LQDWallet
 from hummingbot.market.tex.lqd_eon import LQDEon
-from hummingbot.market.tex.tex_operator_api import (get_current_eon)
+from hummingbot.market.tex.lqd_wallet_sync import LQDWalletSync
+from hummingbot.market.tex.tex_operator_api import (get_current_eon, get_wallet_data)
 from hummingbot.market.tex.tex_order_book_tracker import TEXOrderBookTracker
 from hummingbot.market.tex.tex_in_flight_order import TEXInFlightOrder
+from hummingbot.market.tex.tex_utils import (sign_data, generate_seed)
+from hummingbot.market.tex.tex_crypto import HDPrivateKey, HDKey
 from hummingbot.core.network_iterator import NetworkStatus
 from hummingbot.core.data_type.order_book_tracker import OrderBookTrackerDataSourceType
 from hummingbot.core.data_type.order_book cimport OrderBook
@@ -57,6 +60,7 @@ from hummingbot.core.data_type.cancellation_result import CancellationResult
 from hummingbot.core.data_type.transaction_tracker import TransactionTracker
 from hummingbot.market.trading_rule cimport TradingRule
 from hummingbot.wallet.ethereum.web3_wallet import Web3Wallet
+from eth_utils import (to_checksum_address)
 from web3 import Web3
 s_logger = None
 
@@ -64,6 +68,9 @@ s_decimal_0 = Decimal(0)
 NETWORK= 'RINKEBY'
 ETH_RPC_URL = 'https://rinkeby.infura.io/v3/9aed27c49d81418687a11e11aa00be0a'
 UPDATE_BALANCES_INTERVAL = 5
+SUB_WALLET_COUNT = 5
+# TODO: Should be auto fetched.
+CONTRACT_ADDRESS = '0x66b26B6CeA8557D6d209B33A30D69C11B0993a3a'
 cdef class TEXMarketTransactionTracker(TransactionTracker):
     cdef:
         TEXMarket _owner
@@ -97,6 +104,7 @@ cdef class TEXMarket(MarketBase):
         super().__init__()
         self._trading_required = trading_required
         self._order_book_tracker = TEXOrderBookTracker(data_source_type=order_book_tracker_data_source_type, symbols=symbols)
+        self._lqd_wallet_sync = LQDWalletSync()
         self._ev_loop = asyncio.get_event_loop()
         self._poll_notifier = asyncio.Event()
         self._last_timestamp = 0
@@ -106,13 +114,17 @@ cdef class TEXMarket(MarketBase):
         self._data_source_type = order_book_tracker_data_source_type
         self._status_polling_task = None
         self._order_tracker_task = None
+        self._lqd_wallet_sync_task = None
         self._shared_client = None
         self._async_scheduler = AsyncCallScheduler(call_interval=0.5)
         self._last_pull_timestamp = 0
-        self.logger().info(f"RPC ->> {ETH_RPC_URL}")
+        self._symbols = symbols
         self._w3 = Web3(Web3.HTTPProvider(ETH_RPC_URL))
-        self._wallet = wallet
-        self._network_id = int(self._w3.net.version)
+        self._eth_wallet = wallet  # Main account web3 wallet
+        self._eth_sub_wallets = []  # Defines an array of sub wallets when each item in the list has `address` and `private_key`
+        self._network_id = int(self._w3.net.version)  # Defines the network id of the current w3 instance.
+        self._wallet_map = None  # {key: wallet} -> Where key is of the form `token/address` and wallet is of type LQDWallet.
+        self._sub_wallets_status = None  # {available: [], blocked: []} -> Defines the availability of sub wallets.
 
     @property
     def name(self) -> str:
@@ -194,11 +206,6 @@ cdef class TEXMarket(MarketBase):
                     exc_info=True,
                     app_warning_msg=f"Failed to fetch account updates on TEX. Check network connection.")
 
-    async def _register_wallet(self):
-        current_eon_number = await get_current_eon()
-        print(current_eon_number)
-        return ''
-
     async def _update_balances(self):
         cdef:
             double current_timestamp = self._current_timestamp
@@ -208,6 +215,49 @@ cdef class TEXMarket(MarketBase):
             self._account_balances = total_balances
             self._last_update_balances_timestamp = current_timestamp
 
+    async def _create_wallet(self, wallet_address: str, token_address: str, eon_number: int) -> LQDWallet:
+        wallet_data = await get_wallet_data(wallet_address = wallet_address, token_address = token_address, eon_number = eon_number)
+        trail_identifier = wallet_data['registration']['trail_identifier']
+        previous_eon = None if wallet_data['registration']['eon_number'] == eon_number else self._init_eon(wallet_data, eon_number - 1)
+        current_eon = self._init_eon(wallet_data, eon_number)
+        return LQDWallet(token_address = token_address, wallet_address = wallet_address,
+                         contract_address = CONTRACT_ADDRESS, trail_identifier = trail_identifier,
+                         current_eon = current_eon, previous_eon = previous_eon, ws_stream = None)
+
+    def _generate_sub_wallets(self):
+        if len(self._eth_sub_wallets) == 0:
+            seed = generate_seed(self._eth_wallet, self.logger())
+            master_key = HDPrivateKey.master_key_from_mnemonic(seed)
+            root_keys = HDKey.from_path(master_key, "m/44'/60'/0'")
+            acct_priv_key = root_keys[-1]
+            for i in range(SUB_WALLET_COUNT):
+                keys = HDKey.from_path(acct_priv_key, '{change}/{index}'.format(change=0, index=i))
+                private_key = keys[-1]
+                public_key = private_key.public_key
+                address = to_checksum_address(private_key.public_key.address())
+                eth_sub_wallet = {'address': address, 'private_key': private_key._key.to_hex()}
+                self._eth_sub_wallets.append(eth_sub_wallet)
+
+    def _init_eon(self, wallet_data: Dict, eon_number: int) -> LQDEon:
+        merkle_proofs_filtered = [proof for proof in wallet_data['merkle_proofs'] if proof['eon_number'] == eon_number]
+        merkle_proof = None if len(merkle_proofs_filtered) == 0 else merkle_proofs_filtered[0]
+        transfers = [transfer for transfer in wallet_data['transfers'] if transfer['eon_number'] == eon_number]
+        deposits = [deposit for deposit in wallet_data['deposits'] if deposit['eon_number'] == eon_number]
+        withdrawals = [withdrawal for withdrawal in wallet_data['withdrawals'] if withdrawal['eon_number'] == eon_number]
+        return LQDEon(transfers = transfers, deposits = deposits, withdrawals = withdrawals,
+                      merkle_proof = merkle_proof, eon_number = eon_number)
+
+    async def _init_LQD_wallets(self):
+        current_eon = await get_current_eon()
+        markets = await self.get_active_exchange_markets()
+        all_wallets_addresses = [self._eth_wallet.address, *[account['address'] for account in self._eth_sub_wallets]]
+        for address in all_wallets_addresses:
+            for symbol in self._symbols:
+                market = markets.loc[symbol]
+                base_token = market.baseAssetAddress
+                quote_token = market.quoteAssetAddress
+                await safe_gather(*[self._create_wallet(address, token_address, current_eon) for token_address in [base_token, quote_token]])
+
     async def _get_lqd_balances(self):
         return 0, 0
 
@@ -215,8 +265,10 @@ cdef class TEXMarket(MarketBase):
         print('starting network')
         if self._order_tracker_task is not None:
             self._stop_network()
-        await self._register_wallet()
-        await self._update_balances()
+        self._generate_sub_wallets()
+        # await self._update_balances()
+        self._lqd_wallet_sync_task = safe_ensure_future(self._lqd_wallet_sync.start())
+        await self._init_LQD_wallets()
         self._order_tracker_task = safe_ensure_future(self._order_book_tracker.start())
         self._status_polling_task = safe_ensure_future(self._status_polling_loop())
 

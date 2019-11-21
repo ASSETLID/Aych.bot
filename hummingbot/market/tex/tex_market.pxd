@@ -23,11 +23,17 @@ cdef class TEXMarket(MarketBase):
         object _data_source_type
         public object _status_polling_task
         public object _order_tracker_task
+        public object _lqd_wallet_sync_task
         public object _trading_rules_polling_task
+        object _lqd_wallet_sync
         object _async_scheduler
         object _set_server_time_offset_task
         object _w3
-        object _wallet
+        object _eth_wallet
         object _network_id
         double _last_update_balances_timestamp
         object _shared_client
+        object _wallet_map
+        object _sub_wallets_status
+        list _eth_sub_wallets
+        list _symbols

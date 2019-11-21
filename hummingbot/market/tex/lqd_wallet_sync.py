@@ -54,7 +54,7 @@ class LQDWalletSync():
     def ws(self) -> websockets.WebSocketClientProtocol:
         return self._ws
 
-    async def start(self, stream: asyncio.Queue):
+    async def start(self):
         if self._ws is not None:
             print('Websocket connection is already open')
             return
@@ -128,7 +128,6 @@ class LQDWalletSync():
             self._state_streams[f"{token}/{wallet_address}"].put_nowait(msg_data)
 
     async def subscribe_wallet(self, wallet_address: str, token_address: str) -> asyncio.Queue:
-        # TODO: Send subscription ws message
         wallet_stream_queue = asyncio.Queue()
         self._state_streams[f"{token_address}/{wallet_address}"] = wallet_stream_queue
         return wallet_stream_queue

@@ -30,6 +30,7 @@ class TEXAPIOrderBookDataSource(OrderBookTrackerDataSource):
         super().__init__()
         self._symbols: Optional[List[str]] = symbols
         self._get_tracking_pair_done_event: asyncio.Event = asyncio.Event()
+        self._all_markets = None
     _baobds_logger: Optional[HummingbotLogger] = None
 
     @classmethod
