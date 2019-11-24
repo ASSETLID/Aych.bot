@@ -3,6 +3,7 @@
 import asyncio
 import websockets
 from websockets.exceptions import ConnectionClosed
+from hummingbot.market.tex.tex_utils import remove_0x_prefix
 from typing import (Dict)
 import ujson
 from enum import Enum
@@ -128,6 +129,7 @@ class LQDWalletSync():
             self._state_streams[f"{token}/{wallet_address}"].put_nowait(msg_data)
 
     async def subscribe_wallet(self, wallet_address: str, token_address: str) -> asyncio.Queue:
+        await self.send_ws_message('subscribe', {'streams': [f"wallet/{remove_0x_prefix(wallet_address)}"]})
         wallet_stream_queue = asyncio.Queue()
         self._state_streams[f"{token_address}/{wallet_address}"] = wallet_stream_queue
         return wallet_stream_queue

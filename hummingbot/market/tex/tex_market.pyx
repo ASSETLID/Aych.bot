@@ -98,12 +98,12 @@ cdef class TEXMarket(MarketBase):
                  poll_interval: float = 5.0,
                  order_book_tracker_data_source_type: OrderBookTrackerDataSourceType =
                  OrderBookTrackerDataSourceType.EXCHANGE_API,
-                 symbols: Optional[List[str]] = None,
+                 trading_pairs: Optional[List[str]] = None,
                  trading_required: bool = True):
 
         super().__init__()
         self._trading_required = trading_required
-        self._order_book_tracker = TEXOrderBookTracker(data_source_type=order_book_tracker_data_source_type, symbols=symbols)
+        self._order_book_tracker = TEXOrderBookTracker(data_source_type=order_book_tracker_data_source_type, trading_pairs=trading_pairs)
         self._lqd_wallet_sync = LQDWalletSync()
         self._ev_loop = asyncio.get_event_loop()
         self._poll_notifier = asyncio.Event()
@@ -118,7 +118,7 @@ cdef class TEXMarket(MarketBase):
         self._shared_client = None
         self._async_scheduler = AsyncCallScheduler(call_interval=0.5)
         self._last_pull_timestamp = 0
-        self._symbols = symbols
+        self._trading_pairs = trading_pairs
         self._w3 = Web3(Web3.HTTPProvider(ETH_RPC_URL))
         self._eth_wallet = wallet  # Main account web3 wallet
         self._eth_sub_wallets = []  # Defines an array of sub wallets when each item in the list has `address` and `private_key`
@@ -220,9 +220,10 @@ cdef class TEXMarket(MarketBase):
         trail_identifier = wallet_data['registration']['trail_identifier']
         previous_eon = None if wallet_data['registration']['eon_number'] == eon_number else self._init_eon(wallet_data, eon_number - 1)
         current_eon = self._init_eon(wallet_data, eon_number)
+        ws_stream = self._lqd_wallet_sync.subscribe_wallet(wallet_address = wallet_address, token_address = token_address)
         return LQDWallet(token_address = token_address, wallet_address = wallet_address,
                          contract_address = CONTRACT_ADDRESS, trail_identifier = trail_identifier,
-                         current_eon = current_eon, previous_eon = previous_eon, ws_stream = None)
+                         current_eon = current_eon, previous_eon = previous_eon, ws_stream = ws_stream)
 
     def _generate_sub_wallets(self):
         if len(self._eth_sub_wallets) == 0:
@@ -252,7 +253,7 @@ cdef class TEXMarket(MarketBase):
         markets = await self.get_active_exchange_markets()
         all_wallets_addresses = [self._eth_wallet.address, *[account['address'] for account in self._eth_sub_wallets]]
         for address in all_wallets_addresses:
-            for symbol in self._symbols:
+            for symbol in self._trading_pairs:
                 market = markets.loc[symbol]
                 base_token = market.baseAssetAddress
                 quote_token = market.quoteAssetAddress

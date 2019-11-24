@@ -36,4 +36,4 @@ cdef class TEXMarket(MarketBase):
         object _wallet_map
         object _sub_wallets_status
         list _eth_sub_wallets
-        list _symbols
+        list _trading_pairs

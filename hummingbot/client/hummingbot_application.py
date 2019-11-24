@@ -277,7 +277,7 @@ class HummingbotApplication(*commands):
                     ethereum_rpc_url=ethereum_rpc_url,
                     poll_interval = 5.0,
                     order_book_tracker_data_source_type=OrderBookTrackerDataSourceType.EXCHANGE_API,
-                    symbols=symbols,
+                    trading_pairs=trading_pairs,
                     trading_required=self._trading_required)
 
             elif market_name == "binance":

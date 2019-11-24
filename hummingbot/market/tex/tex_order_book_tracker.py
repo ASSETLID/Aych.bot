@@ -31,7 +31,7 @@ class TEXOrderBookTracker(OrderBookTracker):
 
     def __init__(self,
                  data_source_type: OrderBookTrackerDataSourceType = OrderBookTrackerDataSourceType.EXCHANGE_API,
-                 symbols: Optional[List[str]] = None):
+                 trading_pairs: Optional[List[str]] = None):
         super().__init__(data_source_type=data_source_type)
 
         self._order_book_diff_stream: asyncio.Queue = asyncio.Queue()
@@ -39,7 +39,7 @@ class TEXOrderBookTracker(OrderBookTracker):
         self._ev_loop: asyncio.BaseEventLoop = asyncio.get_event_loop()
         self._data_source: Optional[OrderBookTrackerDataSource] = None
         self._saved_message_queues: Dict[str, Deque[TEXOrderBookMessage]] = defaultdict(lambda: deque(maxlen=1000))
-        self._symbols: Optional[List[str]] = symbols
+        self._trading_pairs: Optional[List[str]] = trading_pairs
 
     @property
     def data_source(self) -> OrderBookTrackerDataSource:
@@ -47,7 +47,7 @@ class TEXOrderBookTracker(OrderBookTracker):
             if self._data_source_type is OrderBookTrackerDataSourceType.REMOTE_API:
                 self._data_source = RemoteAPIOrderBookDataSource()
             elif self._data_source_type is OrderBookTrackerDataSourceType.EXCHANGE_API:
-                self._data_source = TEXAPIOrderBookDataSource(symbols=self._symbols)
+                self._data_source = TEXAPIOrderBookDataSource(trading_pairs=self._trading_pairs)
             else:
                 raise ValueError(f"data_source_type {self._data_source_type} is not supported.")
         return self._data_source

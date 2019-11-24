@@ -26,9 +26,9 @@ TEX_REST_URL = "https://rinkeby.liquidity.network"
 
 class TEXAPIOrderBookDataSource(OrderBookTrackerDataSource):
 
-    def __init__(self, symbols: Optional[List[str]] = None):
+    def __init__(self, trading_pairs: Optional[List[str]] = None):
         super().__init__()
-        self._symbols: Optional[List[str]] = symbols
+        self._trading_pairs: Optional[List[str]] = trading_pairs
         self._get_tracking_pair_done_event: asyncio.Event = asyncio.Event()
         self._all_markets = None
     _baobds_logger: Optional[HummingbotLogger] = None
@@ -84,21 +84,21 @@ class TEXAPIOrderBookDataSource(OrderBookTrackerDataSource):
         return TEXOrderBook
 
     async def get_trading_pairs(self) -> List[str]:
-        if not self._symbols:
+        if not self._trading_pairs:
             try:
                 active_markets: pd.DataFrame = await self.get_active_exchange_markets()
                 trading_pairs: List[str] = active_markets.index.tolist()
-                self._symbols = trading_pairs
-                print(self._symbols)
+                self._trading_pairs = trading_pairs
+                print(self._trading_pairs)
             except Exception:
-                self._symbols = []
+                self._trading_pairs = []
                 self.logger().network(
                     f"Error getting active exchange information.",
                     exc_info=True,
                     app_warning_msg=f"Error getting active exchange information. Check network connection.",
                 )
-        print(f"symbols -> {self._symbols}")
-        return self._symbols
+        print(f"trading_pairs -> {self._trading_pairs}")
+        return self._trading_pairs
 
     async def get_tracking_pairs(self) -> Dict[str, OrderBookTrackerEntry]:
         # Get the currently active markets
@@ -113,7 +113,7 @@ class TEXAPIOrderBookDataSource(OrderBookTrackerDataSource):
                     snapshot_msg: TEXOrderBookMessage = TEXOrderBook.snapshot_message_from_exchange(
                         snapshot,
                         snapshot_timestamp,
-                        {"symbol": trading_pair}
+                        {"trading_pair": trading_pair}
                     )
                     tex_order_book: OrderBook = self.order_book_create_function()
                     print(snapshot_msg)
@@ -170,7 +170,7 @@ class TEXAPIOrderBookDataSource(OrderBookTrackerDataSource):
                             snapshot_msg: TEXOrderBookMessage = TEXOrderBook.snapshot_message_from_exchange(
                                 snapshot,
                                 snapshot_timestamp,
-                                {"symbol": trading_pair}
+                                {"trading_pair": trading_pair}
                             )
                             print(f"snapshot_msg -> {snapshot_msg}")
                             output.put_nowait(snapshot_msg)
