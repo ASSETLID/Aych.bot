@@ -80,7 +80,7 @@ class LQDWalletSync():
                 self.logger().error('Cancelled exception raised')
                 raise
             except Exception as e:
-                self.logger().error('Error occurred while connecting to ws ', e)
+                self.logger().error(f"Error occurred while connecting to ws: {e}")
                 await asyncio.sleep(20.0)
 
     async def state_notifications_stream(self):
@@ -111,7 +111,7 @@ class LQDWalletSync():
 
     def ws_stream_router(self, msg):
         decoded_msg = ujson.loads(msg)
-        self.logger().info('WS Msg Recieved ->', decoded_msg)
+        self.logger().info(f"WS Msg Recieved -> {decoded_msg}")
         msg_data = decoded_msg['data']
         msg_type = decoded_msg['type']
         if msg_type != 'notification':
@@ -138,20 +138,20 @@ class LQDWalletSync():
             recipient_token = msg_object_data['recipient']['token']
             if sender_token != recipient_token:
                 self._state_streams[f"{recipient_token}/{wallet_address}"].put_nowait(msg_data)
-                self.logger().info('Routing to stream of ->', f"{recipient_token}/{wallet_address}")
+                self.logger().info(f"Routing to stream of -> {recipient_token}/{wallet_address}")
             self._state_streams[f"{sender_token}/{wallet_address}"].put_nowait(msg_data)
-            self.logger().info('Routing to stream of ->', f"{sender_token}/{wallet_address}")
+            self.logger().info(f"Routing to stream of -> {sender_token}/{wallet_address}")
 
         elif event_type in others_model_notifications:
             token = msg_object_data['token']
             self._state_streams[f"{token}/{wallet_address}"].put_nowait(msg_data)
-            self.logger().info('Routing to stream of ->', f"{token}/{wallet_address}")
+            self.logger().info(f"Routing to stream of -> {token}/{wallet_address}")
 
     async def subscribe_wallet(self, wallet_address: str, token_address: str) -> asyncio.Queue:
         await self.send_ws_message('subscribe', {'streams': [f"wallet/{remove_0x_prefix(wallet_address)}"]})
         wallet_stream_queue = asyncio.Queue()
         self._state_streams[f"{token_address}/{wallet_address}"] = wallet_stream_queue
-        self.logger().info('Subscribing to stream of ->', f"{token_address}/{wallet_address}")
+        self.logger().info(f"Subscribing to stream of -> {token_address}/{wallet_address}")
         return wallet_stream_queue
 
     async def send_ws_message(self, op, args):

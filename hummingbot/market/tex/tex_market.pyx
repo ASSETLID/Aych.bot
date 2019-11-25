@@ -120,11 +120,11 @@ cdef class TEXMarket(MarketBase):
         self._last_pull_timestamp = 0
         self._trading_pairs = trading_pairs
         self._w3 = Web3(Web3.HTTPProvider(ETH_RPC_URL))
-        self._eth_wallet = wallet  # Main account web3 wallet
-        self._eth_sub_wallets = []  # Defines an array of sub wallets when each item in the list has `address` and `private_key`
+        self._wallet = wallet  # Main account web3 wallet
+        self._eth_sub_wallets = []  # Defines an array of sub wallets where each item in the list if a dictionary having `address` and `private_key`
         self._network_id = int(self._w3.net.version)  # Defines the network id of the current w3 instance.
-        self._wallet_map = None  # {key: wallet} -> Where key is of the form `token/address` and wallet is of type LQDWallet.
-        self._sub_wallets_status = None  # {available: [], blocked: []} -> Defines the availability of sub wallets.
+        self._wallet_map = {}  # {key: wallet} -> Where key is of the form `token/address` and wallet is of type LQDWallet.
+        self._sub_wallets_status = {'available': [], 'blocked': []}  # {available: [], blocked: []} -> Defines the availability of sub wallets.
 
     @property
     def name(self) -> str:
@@ -188,14 +188,10 @@ cdef class TEXMarket(MarketBase):
         return order_books[symbol]
 
     async def _status_polling_loop(self):
-        print('starting status polling')
         while True:
             try:
-                print('creating poll notifier')
                 self._poll_notifier = asyncio.Event()
-                print('waiting poll notifier')
                 await self._poll_notifier.wait()
-                print('gathering')
                 await self._update_balances()
             except asyncio.CancelledError:
                 raise
@@ -226,11 +222,12 @@ cdef class TEXMarket(MarketBase):
                                current_eon = current_eon, previous_eon = previous_eon, ws_stream = ws_stream)
 
         safe_ensure_future(lqd_wallet.start_notification_consumer())
+        self._wallet_map[f"{token_address}/{wallet_address}"] = lqd_wallet
         return lqd_wallet
 
     def _generate_sub_wallets(self):
         if len(self._eth_sub_wallets) == 0:
-            seed = generate_seed(self._eth_wallet, self.logger())
+            seed = generate_seed(self.wallet, self.logger())
             master_key = HDPrivateKey.master_key_from_mnemonic(seed)
             root_keys = HDKey.from_path(master_key, "m/44'/60'/0'")
             acct_priv_key = root_keys[-1]
@@ -254,7 +251,7 @@ cdef class TEXMarket(MarketBase):
     async def _init_LQD_wallets(self):
         current_eon = await get_current_eon()
         markets = await self.get_active_exchange_markets()
-        all_wallets_addresses = [self._eth_wallet.address, *[account['address'] for account in self._eth_sub_wallets]]
+        all_wallets_addresses = [self.wallet.address, *[account['address'] for account in self._eth_sub_wallets]]
         for address in all_wallets_addresses:
             for symbol in self._trading_pairs:
                 market = markets.loc[symbol]
@@ -263,16 +260,34 @@ cdef class TEXMarket(MarketBase):
                 await safe_gather(*[self._create_wallet(address, token_address, current_eon) for token_address in [base_token, quote_token]])
 
     async def _get_lqd_balances(self):
-        return 0, 0
+        main_wallet_address = self.wallet.address
+        available_balances = {}
+        total_balances = {}
+        markets = await self.get_active_exchange_markets()
+        for trading_pair in self._trading_pairs:
+            market = markets.loc[trading_pair]
+            base_token_address = market.baseAssetAddress
+            quote_token_address = market.quoteAssetAddress
+            base_token = market.baseAsset
+            quote_token = market.quoteAsset
+            base_token_wallet = self._wallet_map[f"{base_token_address}/{main_wallet_address}"]
+            quote_token_wallet = self._wallet_map[f"{quote_token_address}/{main_wallet_address}"]
+            base_token_balance = base_token_wallet.balance(base_token_wallet.current_eon)
+            quote_token_balance = quote_token_wallet.balance(quote_token_wallet.current_eon)
+            available_balances[f"f{base_token}"] = Decimal(base_token_balance * 10.0 ** (-18.0))
+            available_balances[f"f{quote_token}"] = Decimal(quote_token_balance * 10.0 ** (-18.0))
+        # TODO: Calculate total balance by adding the balance held in the sub wallets.
+        total_balances = available_balances
+        return available_balances, total_balances
 
     async def start_network(self):
         print('starting network')
         if self._order_tracker_task is not None:
             self._stop_network()
         self._generate_sub_wallets()
-        # await self._update_balances()
         self._lqd_wallet_sync_task = safe_ensure_future(self._lqd_wallet_sync.start())
         await self._init_LQD_wallets()
+        await self._update_balances()
         self._order_tracker_task = safe_ensure_future(self._order_book_tracker.start())
         self._status_polling_task = safe_ensure_future(self._status_polling_loop())
 

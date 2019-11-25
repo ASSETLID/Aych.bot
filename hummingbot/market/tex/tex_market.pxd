@@ -29,7 +29,7 @@ cdef class TEXMarket(MarketBase):
         object _async_scheduler
         object _set_server_time_offset_task
         object _w3
-        object _eth_wallet
+        object _wallet
         object _network_id
         double _last_update_balances_timestamp
         object _shared_client

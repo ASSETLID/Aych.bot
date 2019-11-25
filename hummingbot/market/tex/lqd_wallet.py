@@ -83,7 +83,7 @@ class LQDWallet():
         merkle_proof = eon.merkle_proof
         if not merkle_proof:
             return 0
-        return merkle_proof['right'] - merkle_proof['left']
+        return int(merkle_proof['right']) - int(merkle_proof['left'])
 
     def spent_and_gained(self, eon: LQDEon) -> Dict[str, float]:
         spent = 0
@@ -108,11 +108,11 @@ class LQDWallet():
 
         return {'spent': spent, 'gained': gained}
 
-    def balance(self, eon: LQDEon) -> float:
+    def balance(self, eon: LQDEon) -> int:
         deposits = eon.deposits
         withdrawals = eon.withdrawals
-        deposits_amount = functools.reduce(lambda total, deposit: total + deposit['amount'], deposits)
-        withdrawals_amount = functools.reduce(lambda total, withdrawal: total + withdrawal['amount'], withdrawals)
+        deposits_amount = functools.reduce(lambda total, deposit: total + deposit['amount'], deposits, 0)
+        withdrawals_amount = functools.reduce(lambda total, withdrawal: total + withdrawal['amount'], withdrawals, 0)
         state_amount = self.spent_and_gained(eon)
         return self.starting_balance(eon) + state_amount['gained'] - \
             state_amount['spent'] + deposits_amount - withdrawals_amount
@@ -233,7 +233,7 @@ class LQDWallet():
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                self.logger().error('Error occurred while consuming notifications: ', e)
+                self.logger().error(f"Error occurred while consuming notifications: {e}")
                 await asyncio.sleep(5.0)
 
     # Updating is done in place by overriding (Check concurrency issues)
