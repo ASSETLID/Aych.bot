@@ -208,6 +208,7 @@ cdef class TEXMarket(MarketBase):
         if current_timestamp - self._last_update_balances_timestamp > UPDATE_BALANCES_INTERVAL or len(self._account_balances) > 0:
             available_balances, total_balances = await self._get_lqd_balances()
             self._account_available_balances = available_balances
+            self.logger().info(f"Balances-> {available_balances}")
             self._account_balances = total_balances
             self._last_update_balances_timestamp = current_timestamp
 
@@ -295,6 +296,7 @@ cdef class TEXMarket(MarketBase):
         if self._order_tracker_task is not None:
             self._order_tracker_task.cancel()
             self._status_polling_task.cancel()
+            self._lqd_wallet_sync_task.cancel()
         self._order_tracker_task = self._status_polling_task = None
 
     async def stop_network(self):

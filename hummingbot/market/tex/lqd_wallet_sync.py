@@ -5,8 +5,8 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 from hummingbot.market.tex.tex_utils import remove_0x_prefix
 from typing import (Dict)
-from enum import Enum
 from hummingbot.logger import HummingbotLogger
+import hummingbot.market.tex.constants.ws_notifications as WSNotificationType
 import logging
 import ujson
 MESSAGE_TIMEOUT = 30
@@ -15,26 +15,10 @@ WS_URL = "wss://rinkeby.liquidity.network/ws/"
 lws_logger = None
 
 
-class WSNotificationType(Enum):
-    INCOMING_TRANSFER = 'INCOMING_TRANSFER'
-    INCOMING_RECEIPT = 'INCOMING_RECEIPT'
-    INCOMING_CONFIRMATION = 'INCOMING_CONFIRMATION'
-    TIMEOUT_TRANSFER = 'TIMEOUT_TRANSFER'
-    MATCHED_SWAP = 'MATCHED_SWAP'
-    FINALIZED_SWAP = 'FINALIZED_SWAP'
-    CANCELLED_SWAP = 'CANCELLED_SWAP'
-    REGISTERED_WALLET = 'REGISTERED_WALLET'
-    CONFIRMED_DEPOSIT = 'CONFIRMED_DEPOSIT'
-    REQUESTED_WITHDRAWAL = 'REQUESTED_WITHDRAWAL'
-    CONFIRMED_WITHDRAWAL = 'CONFIRMED_WITHDRAWAL'
-    CHECKPOINT_CREATED = 'CHECKPOINT_CREATED'
-
-
-class WSOperationType(Enum):
-    SUBSCRIBE = 'subscribe'
-    UNSUBSCRIBE = 'unsubscribe'
-    PING = 'ping'
-    ACK = 'ack'
+SUBSCRIBE = 'subscribe'
+UNSUBSCRIBE = 'unsubscribe'
+PING = 'ping'
+ACK = 'ack'
 
 
 class LQDWalletSync():
@@ -80,7 +64,7 @@ class LQDWalletSync():
                 self.logger().error('Cancelled exception raised')
                 raise
             except Exception as e:
-                self.logger().error(f"Error occurred while connecting to ws: {e}")
+                self.logger().error(f"Error occurred while dealing with ws: {e.__class__}: {e}")
                 await asyncio.sleep(20.0)
 
     async def state_notifications_stream(self):
@@ -110,17 +94,16 @@ class LQDWalletSync():
             await self.ws.close()
 
     def ws_stream_router(self, msg):
-        decoded_msg = ujson.loads(msg)
-        self.logger().info(f"WS Msg Recieved -> {decoded_msg}")
-        msg_data = decoded_msg['data']
-        msg_type = decoded_msg['type']
-        if msg_type != 'notification':
+        ws_msg = ujson.loads(msg)
+        self.logger().info(f"WS Msg Recieved -> {ws_msg}")
+
+        if ws_msg['type'] != 'notification':
             return
 
-        msg_object_data = msg_data['data']
-        stream_type = msg_data['type']
-        event_type = msg_object_data['type']
-        wallet_address = stream_type[6:]
+        stream_msg = ws_msg['data']
+        notification_msg = stream_msg['data']
+        notification_data = notification_msg['data']
+        wallet_address = f"0x{stream_msg['type'][7:]}"
         transfer_model_notifications = [WSNotificationType.INCOMING_TRANSFER,
                                         WSNotificationType.INCOMING_RECEIPT,
                                         WSNotificationType.INCOMING_CONFIRMATION,
@@ -133,18 +116,21 @@ class LQDWalletSync():
                                       WSNotificationType.CONFIRMED_WITHDRAWAL,
                                       WSNotificationType.CHECKPOINT_CREATED]
 
-        if event_type in transfer_model_notifications:
-            sender_token = msg_object_data['wallet']['token']
-            recipient_token = msg_object_data['recipient']['token']
+        self.logger().info(f"WS Msg Event Type -> {notification_msg['type']}, {transfer_model_notifications}")
+        if notification_msg['type'] in transfer_model_notifications:
+            self.logger().info(f"Inside transfer model notifications.. {notification_data}")
+            sender_token = notification_data['wallet']['token']
+            recipient_token = notification_data['recipient']['token']
             if sender_token != recipient_token:
-                self._state_streams[f"{recipient_token}/{wallet_address}"].put_nowait(msg_data)
+                self._state_streams[f"{recipient_token}/{wallet_address}"].put_nowait(notification_msg)
                 self.logger().info(f"Routing to stream of -> {recipient_token}/{wallet_address}")
-            self._state_streams[f"{sender_token}/{wallet_address}"].put_nowait(msg_data)
+            self._state_streams[f"{sender_token}/{wallet_address}"].put_nowait(notification_msg)
             self.logger().info(f"Routing to stream of -> {sender_token}/{wallet_address}")
 
-        elif event_type in others_model_notifications:
-            token = msg_object_data['token']
-            self._state_streams[f"{token}/{wallet_address}"].put_nowait(msg_data)
+        elif notification_msg['type'] in others_model_notifications:
+            self.logger().info(f"Inside others model notifications..")
+            token = notification_data['token']
+            self._state_streams[f"{token}/{wallet_address}"].put_nowait(notification_msg)
             self.logger().info(f"Routing to stream of -> {token}/{wallet_address}")
 
     async def subscribe_wallet(self, wallet_address: str, token_address: str) -> asyncio.Queue:

@@ -1,0 +1,6 @@
+SENDER = 'sender_active_state'
+RECIPIENT = 'recipient_active_state'
+SENDER_CANCELLATION = 'sender_cancellation_active_state'
+RECIPIENT_CANCELLATION = 'recipient_cancellation_active_state'
+RECIPIENT_FINALIZATION = 'recipient_finalization_active_state'
+FULFILLMENT = 'recipient_fulfillment_active_state'

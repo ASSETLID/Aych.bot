@@ -1,5 +1,4 @@
 from typing import (Dict)
-from enum import Enum
 import asyncio
 from hummingbot.market.tex.tex_utils import (
     is_same_hex,
@@ -7,22 +6,14 @@ from hummingbot.market.tex.tex_utils import (
 )
 from web3 import Web3
 from hummingbot.market.tex.lqd_eon import LQDEon
-from hummingbot.market.tex.lqd_wallet_sync import WSNotificationType
+import hummingbot.market.tex.constants.ws_notifications as WSNotificationType
+import hummingbot.market.tex.constants.active_states as ActiveStateType
 from hummingbot.logger import HummingbotLogger
 import logging
 import functools
 
 EMPTY_HASH = '0x0000000000000000000000000000000000000000000000000000000000000000'
 lw_logger = None
-
-
-class ActiveStateType(Enum):
-    SENDER = 'sender_active_state'
-    RECIPIENT = 'recipient_active_state'
-    SENDER_CANCELLATION = 'sender_cancellation_active_state'
-    RECIPIENT_CANCELLATION = 'recipient_cancellation_active_state'
-    RECIPIENT_FINALIZATION = 'recipient_finalization_active_state'
-    FULFILLMENT = 'recipient_fulfillment_active_state'
 
 
 class LQDWallet():
@@ -96,23 +87,23 @@ class LQDWallet():
             if is_sender:
                 if is_swap:
                     # TODO: Should only add the current eon matched out
-                    spent += transfer['matched_amounts']['matched_out']
+                    spent += int(transfer['matched_amounts']['matched_out'])
                 else:
-                    spent += transfer['amount']
+                    spent += int(transfer['amount'])
             else:
                 if is_swap:
                     # TODO: Should only add the current eon matched in
-                    gained += transfer['matched_amounts']['matched_in']
+                    gained += int(transfer['matched_amounts']['matched_in'])
                 else:
-                    gained += transfer['amount']
+                    gained += int(transfer['amount'])
 
         return {'spent': spent, 'gained': gained}
 
     def balance(self, eon: LQDEon) -> int:
         deposits = eon.deposits
         withdrawals = eon.withdrawals
-        deposits_amount = functools.reduce(lambda total, deposit: total + deposit['amount'], deposits, 0)
-        withdrawals_amount = functools.reduce(lambda total, withdrawal: total + withdrawal['amount'], withdrawals, 0)
+        deposits_amount = functools.reduce(lambda total, deposit: total + int(deposit['amount']), deposits, 0)
+        withdrawals_amount = functools.reduce(lambda total, withdrawal: total + int(withdrawal['amount']), withdrawals, 0)
         state_amount = self.spent_and_gained(eon)
         return self.starting_balance(eon) + state_amount['gained'] - \
             state_amount['spent'] + deposits_amount - withdrawals_amount
@@ -225,9 +216,11 @@ class LQDWallet():
         return result
 
     async def start_notification_consumer(self):
+        self.logger().info(f"Starting wallet notification listener...")
         while True:
             try:
                 msg = await self._ws_stream.get()
+                self.logger().info(f"Wallet stream message -> {msg}")
                 self.state_updater(msg)
 
             except asyncio.CancelledError:
@@ -242,7 +235,6 @@ class LQDWallet():
         transfer_model_notifications = [WSNotificationType.INCOMING_TRANSFER,
                                         WSNotificationType.INCOMING_RECEIPT,
                                         WSNotificationType.INCOMING_CONFIRMATION,
-                                        WSNotificationType.INCOMING_TIMEOUT,
                                         WSNotificationType.MATCHED_SWAP,
                                         WSNotificationType.FINALIZED_SWAP,
                                         WSNotificationType.CANCELLED_SWAP]
