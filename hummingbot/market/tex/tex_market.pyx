@@ -220,10 +220,13 @@ cdef class TEXMarket(MarketBase):
         trail_identifier = wallet_data['registration']['trail_identifier']
         previous_eon = None if wallet_data['registration']['eon_number'] == eon_number else self._init_eon(wallet_data, eon_number - 1)
         current_eon = self._init_eon(wallet_data, eon_number)
-        ws_stream = self._lqd_wallet_sync.subscribe_wallet(wallet_address = wallet_address, token_address = token_address)
-        return LQDWallet(token_address = token_address, wallet_address = wallet_address,
-                         contract_address = CONTRACT_ADDRESS, trail_identifier = trail_identifier,
-                         current_eon = current_eon, previous_eon = previous_eon, ws_stream = ws_stream)
+        ws_stream = await self._lqd_wallet_sync.subscribe_wallet(wallet_address = wallet_address, token_address = token_address)
+        lqd_wallet = LQDWallet(token_address = token_address, wallet_address = wallet_address,
+                               contract_address = CONTRACT_ADDRESS, trail_identifier = trail_identifier,
+                               current_eon = current_eon, previous_eon = previous_eon, ws_stream = ws_stream)
+
+        safe_ensure_future(lqd_wallet.start_notification_consumer())
+        return lqd_wallet
 
     def _generate_sub_wallets(self):
         if len(self._eth_sub_wallets) == 0:

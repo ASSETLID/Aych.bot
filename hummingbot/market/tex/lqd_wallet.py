@@ -8,8 +8,12 @@ from hummingbot.market.tex.tex_utils import (
 from web3 import Web3
 from hummingbot.market.tex.lqd_eon import LQDEon
 from hummingbot.market.tex.lqd_wallet_sync import WSNotificationType
+from hummingbot.logger import HummingbotLogger
+import logging
 import functools
+
 EMPTY_HASH = '0x0000000000000000000000000000000000000000000000000000000000000000'
+lw_logger = None
 
 
 class ActiveStateType(Enum):
@@ -22,6 +26,13 @@ class ActiveStateType(Enum):
 
 
 class LQDWallet():
+
+    @classmethod
+    def logger(cls) -> HummingbotLogger:
+        global lw_logger
+        if lw_logger is None:
+            lw_logger = logging.getLogger(__name__)
+        return lw_logger
 
     def __init__(self,
                  token_address: str,
@@ -213,7 +224,7 @@ class LQDWallet():
 
         return result
 
-    async def ws_notification_consumer(self):
+    async def start_notification_consumer(self):
         while True:
             try:
                 msg = await self._ws_stream.get()

@@ -5,11 +5,14 @@ import websockets
 from websockets.exceptions import ConnectionClosed
 from hummingbot.market.tex.tex_utils import remove_0x_prefix
 from typing import (Dict)
-import ujson
 from enum import Enum
+from hummingbot.logger import HummingbotLogger
+import logging
+import ujson
 MESSAGE_TIMEOUT = 30
 PING_TIMEOUT = 10
-WS_URL = "ws://localhost:8787"
+WS_URL = "wss://rinkeby.liquidity.network/ws/"
+lws_logger = None
 
 
 class WSNotificationType(Enum):
@@ -38,6 +41,13 @@ class LQDWalletSync():
     __instance = None
     _ws: websockets.WebSocketClientProtocol = None
 
+    @classmethod
+    def logger(cls) -> HummingbotLogger:
+        global lws_logger
+        if lws_logger is None:
+            lws_logger = logging.getLogger(__name__)
+        return lws_logger
+
     def __init__(self):
         if LQDWalletSync.__instance is not None:
             raise Exception("New instance of a singleton class can not be created")
@@ -65,11 +75,13 @@ class LQDWalletSync():
                 async with websockets.connect(WS_URL) as ws:
                     self._ws = ws
                     async for msg in self.state_notifications_stream():
+                        print('ROUTING MSG -> ', msg)
                         self.ws_stream_router(msg)
             except asyncio.CancelledError:
                 print('Cancelled exception raised')
                 raise
-            except Exception:
+            except Exception as e:
+                print('Error occurred while connecting to ws ', e)
                 await asyncio.sleep(20.0)
 
     async def state_notifications_stream(self):
@@ -78,12 +90,13 @@ class LQDWalletSync():
                 print('recieving...')
                 try:
                     msg: str = await asyncio.wait_for(self.ws.recv(), timeout=MESSAGE_TIMEOUT)
+                    print('MSG RECIEVED -> ', msg)
                     decoded_msg = ujson.loads(msg)
                     # Reply with ACK message to the server
                     await self.send_ws_message('ack', {'uuid': decoded_msg['uuid']})
-                    print(f"Recieving -> {msg}")
                     yield msg
                 except asyncio.TimeoutError:
+                    print('Timeout Error')
                     try:
                         pong_waiter = await self.ws.ping()
                         await asyncio.wait_for(pong_waiter, timeout=PING_TIMEOUT)
@@ -93,6 +106,7 @@ class LQDWalletSync():
             print("WebSocket ping timed out. Going to reconnect...")
             return
         except ConnectionClosed:
+            print('Connection closed')
             return
         finally:
             await self.ws.close()
@@ -100,6 +114,11 @@ class LQDWalletSync():
     def ws_stream_router(self, msg):
         decoded_msg = ujson.loads(msg)
         msg_data = decoded_msg['data']
+        msg_type = decoded_msg['type']
+        print('msg -> ', decoded_msg)
+        if msg_type != 'notification':
+            return
+
         msg_object_data = msg_data['data']
         stream_type = msg_data['type']
         event_type = msg_object_data['type']
@@ -107,7 +126,6 @@ class LQDWalletSync():
         transfer_model_notifications = [WSNotificationType.INCOMING_TRANSFER,
                                         WSNotificationType.INCOMING_RECEIPT,
                                         WSNotificationType.INCOMING_CONFIRMATION,
-                                        WSNotificationType.INCOMING_TIMEOUT,
                                         WSNotificationType.MATCHED_SWAP,
                                         WSNotificationType.FINALIZED_SWAP,
                                         WSNotificationType.CANCELLED_SWAP]
@@ -129,11 +147,14 @@ class LQDWalletSync():
             self._state_streams[f"{token}/{wallet_address}"].put_nowait(msg_data)
 
     async def subscribe_wallet(self, wallet_address: str, token_address: str) -> asyncio.Queue:
+        print('subscribing..')
         await self.send_ws_message('subscribe', {'streams': [f"wallet/{remove_0x_prefix(wallet_address)}"]})
+        print('subscribed successfully!')
         wallet_stream_queue = asyncio.Queue()
         self._state_streams[f"{token_address}/{wallet_address}"] = wallet_stream_queue
         return wallet_stream_queue
 
     async def send_ws_message(self, op, args):
         data = {'op': op, 'args': args}
+        print('data => ', data)
         await self.ws.send(ujson.dumps(data))
