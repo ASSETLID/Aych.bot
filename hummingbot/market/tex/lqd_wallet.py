@@ -229,16 +229,11 @@ class LQDWallet():
             try:
                 msg = await self._ws_stream.get()
                 self.state_updater(msg)
-                print(f"Consuming -> {msg}")
 
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                print(
-                    f"Unexpected error routing order book messages.",
-                    exc_info=True,
-                    app_warning_msg=f"Unexpected error routing order book messages. Retrying after 5 seconds."
-                )
+            except Exception as e:
+                self.logger().error('Error occurred while consuming notifications: ', e)
                 await asyncio.sleep(5.0)
 
     # Updating is done in place by overriding (Check concurrency issues)
