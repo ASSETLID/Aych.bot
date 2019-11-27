@@ -193,6 +193,7 @@ cdef class TEXMarket(MarketBase):
                 self._poll_notifier = asyncio.Event()
                 await self._poll_notifier.wait()
                 await self._update_balances()
+                await self._sync_sub_wallets()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -280,6 +281,48 @@ cdef class TEXMarket(MarketBase):
         # TODO: Calculate total balance by adding the balance held in the sub wallets.
         total_balances = available_balances
         return available_balances, total_balances
+
+    async def _process_sub_wallet(self, sub_wallet: LQDWallet, token_address: str):
+        is_used = False
+        non_finalized_swaps = []
+        self.logger().info(f"transfers -> {sub_wallet.current_eon.transfers}")
+        for transfer in sub_wallet.current_eon.transfers:
+            self.logger().info(f"transfer: {transfer}")
+            is_tx_pending = not transfer["complete"] and not transfer["cancelled"] and not transfer["voided"]
+            no_cancellation_state = transfer["cancelled"] and not transfer["sender_cancellation_active_state"]
+            if is_tx_pending or no_cancellation_state:
+                self.logger().info(f"transfer is pending")
+                is_used = True
+            if transfer["recipient"]["token"] == token_address and transfer["complete"] and not transfer["recipient_finalization_active_state"]:
+                non_finalized_swaps.append(transfer)
+
+        # TODO: Finalize swaps here
+        # TODO: Harvest free sub wallets
+        return is_used
+
+    async def _sync_sub_wallets(self):
+        self.logger().info(f"Syncing sub wallets...")
+        markets = await self.get_active_exchange_markets()
+        # TODO: Handle multple pairs (Currently handling only one token pair)
+        trading_pair = self._trading_pairs[0]
+        market = markets.loc[trading_pair]
+        tokens = [market.baseAssetAddress, market.quoteAssetAddress]
+        self._sub_wallets_status["available"] = []
+        self._sub_wallets_status["blocked"] = []
+        for index, eth_sub_wallet in enumerate(self._eth_sub_wallets):
+            is_account_free = True
+            for token in tokens:
+                sub_wallet_address = eth_sub_wallet["address"]
+                self.logger().info(f"Processing -> {token}/{sub_wallet_address}")
+                sub_wallet = self._wallet_map[f"{token}/{sub_wallet_address}"]
+                is_used = await self._process_sub_wallet(sub_wallet, token)
+                if is_used:
+                    is_account_free = False
+            if is_account_free:
+                self._sub_wallets_status["available"].append(index)
+            else:
+                self._sub_wallets_status["blocked"].append(index)
+        self.logger().info(f"Sub wallets status: {self._sub_wallets_status}")
 
     async def start_network(self):
         print('starting network')
