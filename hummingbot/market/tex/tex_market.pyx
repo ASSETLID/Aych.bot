@@ -48,10 +48,10 @@ from hummingbot.market.market_base import (
 from hummingbot.market.tex.lqd_wallet import LQDWallet
 from hummingbot.market.tex.lqd_eon import LQDEon
 from hummingbot.market.tex.lqd_wallet_sync import LQDWalletSync
-from hummingbot.market.tex.tex_operator_api import (get_current_eon, get_wallet_data)
+from hummingbot.market.tex.tex_operator_api import (get_current_eon, get_wallet_data, get_registration_data, post_transfer)
 from hummingbot.market.tex.tex_order_book_tracker import TEXOrderBookTracker
 from hummingbot.market.tex.tex_in_flight_order import TEXInFlightOrder
-from hummingbot.market.tex.tex_utils import (sign_data, generate_seed)
+from hummingbot.market.tex.tex_utils import (sign_data, generate_seed, hash_balance_marker)
 from hummingbot.market.tex.tex_crypto import HDPrivateKey, HDKey
 from hummingbot.core.network_iterator import NetworkStatus
 from hummingbot.core.data_type.order_book_tracker import OrderBookTrackerDataSourceType
@@ -61,6 +61,8 @@ from hummingbot.core.data_type.transaction_tracker import TransactionTracker
 from hummingbot.market.trading_rule cimport TradingRule
 from hummingbot.wallet.ethereum.web3_wallet import Web3Wallet
 from eth_utils import (to_checksum_address)
+from copy import (copy, deepcopy)
+import random
 from web3 import Web3
 s_logger = None
 
@@ -121,7 +123,7 @@ cdef class TEXMarket(MarketBase):
         self._trading_pairs = trading_pairs
         self._w3 = Web3(Web3.HTTPProvider(ETH_RPC_URL))
         self._wallet = wallet  # Main account web3 wallet
-        self._eth_sub_wallets = []  # Defines an array of sub wallets where each item in the list if a dictionary having `address` and `private_key`
+        self._eth_sub_wallets = []  # Defines an array of sub wallets where each item in the list is a dictionary having `address` and `private_key`
         self._network_id = int(self._w3.net.version)  # Defines the network id of the current w3 instance.
         self._wallet_map = {}  # {key: wallet} -> Where key is of the form `token/address` and wallet is of type LQDWallet.
         self._sub_wallets_status = {'available': [], 'blocked': []}  # {available: [], blocked: []} -> Defines the availability of sub wallets.
@@ -229,7 +231,7 @@ cdef class TEXMarket(MarketBase):
 
     def _generate_sub_wallets(self):
         if len(self._eth_sub_wallets) == 0:
-            seed = generate_seed(self.wallet, self.logger())
+            seed = generate_seed(self.wallet.private_key)
             master_key = HDPrivateKey.master_key_from_mnemonic(seed)
             root_keys = HDKey.from_path(master_key, "m/44'/60'/0'")
             acct_priv_key = root_keys[-1]
@@ -324,6 +326,47 @@ cdef class TEXMarket(MarketBase):
                 self._sub_wallets_status["blocked"].append(index)
         self.logger().info(f"Sub wallets status: {self._sub_wallets_status}")
 
+    async def _send_transfer(self, sender_address: str, recipient_address: str, amount: float, token_address: str, sub_account_index: int = None):
+        amount = amount * 10 ** 18
+        sender_wallet = self._wallet_map[f"{token_address}/{sender_address}"]
+        sender_balance = sender_wallet.balance(sender_wallet.current_eon)
+        recipient_registration = await get_registration_data(recipient_address, token_address)
+        nonce = random.randint(1, 999999)
+        sender_eth_wallet = self.wallet if sub_account_index is None else self._eth_sub_wallets[sub_account_index]
+        new_transfer = {'id': 0,
+                        'amount': str(int(amount)),
+                        'amount_swapped': '0',
+                        'wallet': {'address': sender_address,
+                                   'token': token_address},
+                        'recipient': {'address': recipient_address,
+                                      'token': token_address},
+                        'recipient_trail_identifier': recipient_registration["trail_identifier"],
+                        'nonce': str(nonce),
+                        'passive': True,
+                        'position': None,
+                        'eon_number': sender_wallet.current_eon.eon_number,
+                        'processed': False, 'complete': False, 'voided': False, 'cancelled': False, 'appended': False,
+                        'matched_amounts': {'in': '0', 'out': '0', 'matched_in': '0', 'matched_out': '0'}
+                        }
+        wallet_copy = sender_wallet
+        wallet_copy.current_eon.transfers.append(new_transfer)
+        active_state_hash = wallet_copy.active_state_hash()
+        balance_marker = hash_balance_marker(contract_address = CONTRACT_ADDRESS, token_address = token_address,
+                                             wallet_address = sender_address, eon_number = sender_wallet.current_eon.eon_number,
+                                             balance = sender_balance - int(amount))
+
+        active_state_signature = sign_data(active_state_hash.hex(), sender_eth_wallet.private_key)
+        balance_marker_signature = sign_data(balance_marker.hex(), sender_eth_wallet.private_key)
+
+        transfer = await post_transfer(wallet_address = sender_address,
+                                       token_address = token_address,
+                                       active_state_signature = active_state_signature.hex(),
+                                       balance_marker_signature = balance_marker_signature.hex(),
+                                       wallet_balance = str(sender_balance - int(amount)),
+                                       transfer = new_transfer,
+                                       logger = self.logger)
+        return transfer
+
     async def start_network(self):
         print('starting network')
         if self._order_tracker_task is not None:
@@ -332,6 +375,7 @@ cdef class TEXMarket(MarketBase):
         self._lqd_wallet_sync_task = safe_ensure_future(self._lqd_wallet_sync.start())
         await self._init_LQD_wallets()
         await self._update_balances()
+        await self._send_transfer(self.wallet.address, '0xDE9Aa519E2Ee3135D008920e6a85dda5EB91C9A1', 0.001, CONTRACT_ADDRESS)
         self._order_tracker_task = safe_ensure_future(self._order_book_tracker.start())
         self._status_polling_task = safe_ensure_future(self._status_polling_loop())
 

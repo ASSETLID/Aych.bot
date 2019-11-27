@@ -83,7 +83,7 @@ class LQDWallet():
         for transfer in transfers:
             is_sender = is_same_hex(transfer['wallet']['address'], self.wallet_address) and \
                 is_same_hex(transfer['wallet']['token'], self.token_address)
-            is_swap = transfer['amount_swapped']
+            is_swap = int(transfer['amount_swapped'])
             if is_sender:
                 if is_swap:
                     # TODO: Should only add the current eon matched out
@@ -170,19 +170,18 @@ class LQDWallet():
         contract_address_hash = Web3.soliditySha3(['address'], [self.contract_address])
         token_address_hash = Web3.soliditySha3(['address'], [self.token_address])
         wallet_address_hash = Web3.soliditySha3(['address'], [self.wallet_address])
-        transaction_set_hash = self.construct_merkle_tree(self.eons[self.latest_eon_number].transfers)['hash']
-        state_amount = self.spent_and_gained(self.latest_eon_number)
+        transaction_set_hash = self.calculate_tx_set_hash(self.current_eon.transfers)
+        state_amount = self.spent_and_gained(self.current_eon)
+        self.logger().info(state_amount['spent'], state_amount['gained'])
         return Web3.soliditySha3(['bytes32', 'bytes32', 'bytes32', 'uint64', 'uint256',
                                   'bytes32', 'uint256', 'uint256'],
                                  [contract_address_hash, token_address_hash, wallet_address_hash,
-                                  self.trail_identifier, self.latest_eon_number, transaction_set_hash,
+                                  self.trail_identifier, self.current_eon.eon_number, transaction_set_hash,
                                   state_amount['spent'], state_amount['gained']])
 
     def calculate_tx_set_hash(self, transfers) -> str:
-        # filter out incoming passive transfers
-        transfers = filter(lambda transfer: not (transfer['passive'] or
-                                                 is_same_hex(transfer['recipient']['address'],
-                                                             self.wallet_address)), transfers)
+        # filter out incoming and passive transfers
+        transfers = [transfer for transfer in transfers if not transfer['passive'] and not is_same_hex(transfer['recipient']['address'], self.wallet_address)]
         if len(transfers) > 0:
             padding_length = next_power_of_2(len(transfers)) - len(transfers)
             transfers += [{'is_padding': True}] * padding_length
