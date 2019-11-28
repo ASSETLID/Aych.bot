@@ -30,8 +30,8 @@ def generate_state_checksum(contract_address: str, token_address: str, wallet_ad
                               wallet_address_hash, 0, eon_number, EMPTY_HASH, 0, 0]).hex()
 
 
-def sign_data(data, priv_key: str):
-    msg_hash = defunct_hash_message(lqd_hash_wrapper(data))
+def sign_data(data, priv_key: str, data_type = 'bytes32'):
+    msg_hash = defunct_hash_message(lqd_hash_wrapper(data, data_type))
     signature = Account.signHash(msg_hash, priv_key)
     return signature['signature']
 
@@ -44,12 +44,12 @@ def next_power_of_2(x):
     return 1 if x == 0 else 2**(x - 1).bit_length()
 
 
-def lqd_hash_wrapper(msg):
-    return Web3.soliditySha3(['string', 'string'], ['\x19Liquidity.Network Authorization:\n32', msg])
+def lqd_hash_wrapper(data, data_type: str):
+    return Web3.soliditySha3(['string', data_type], ['\x19Liquidity.Network Authorization:\n32', data])
 
 
 def generate_seed(priv_key: str):
-    signature = sign_data(SEED_MESSAGE, priv_key)
+    signature = sign_data(data = SEED_MESSAGE, priv_key = priv_key, data_type = 'string')
     signature_str = signature.hex()[2:]
     seed = keccak(text=signature_str)
     return seed.hex()
@@ -63,7 +63,6 @@ def hash_balance_marker(contract_address: str, token_address: str, wallet_addres
     contract_address_hash = Web3.soliditySha3(['address'], [contract_address])
     token_address_hash = Web3.soliditySha3(['address'], [token_address])
     wallet_address_hash = Web3.soliditySha3(['address'], [wallet_address])
-
     return Web3.soliditySha3(['bytes32', 'bytes32', 'bytes32', 'uint256', 'uint256'],
                              [contract_address_hash, token_address_hash, wallet_address_hash,
                               eon_number, balance])

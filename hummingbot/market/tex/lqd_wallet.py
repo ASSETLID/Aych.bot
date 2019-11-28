@@ -2,7 +2,8 @@ from typing import (Dict)
 import asyncio
 from hummingbot.market.tex.tex_utils import (
     is_same_hex,
-    next_power_of_2
+    next_power_of_2,
+    remove_0x_prefix
 )
 from web3 import Web3
 from hummingbot.market.tex.lqd_eon import LQDEon
@@ -11,7 +12,6 @@ import hummingbot.market.tex.constants.active_states as ActiveStateType
 from hummingbot.logger import HummingbotLogger
 import logging
 import functools
-
 EMPTY_HASH = '0x0000000000000000000000000000000000000000000000000000000000000000'
 lw_logger = None
 
@@ -83,7 +83,7 @@ class LQDWallet():
         for transfer in transfers:
             is_sender = is_same_hex(transfer['wallet']['address'], self.wallet_address) and \
                 is_same_hex(transfer['wallet']['token'], self.token_address)
-            is_swap = int(transfer['amount_swapped'])
+            is_swap = transfer['amount_swapped']
             if is_sender:
                 if is_swap:
                     # TODO: Should only add the current eon matched out
@@ -133,34 +133,30 @@ class LQDWallet():
                 latest_transfer[ActiveStateType.RECIPIENT]
 
     def normal_transfer_hash(self, transfer) -> str:
-        nonce = transfer['nonce']
+        nonce = int(transfer['nonce'])
         if transfer['passive']:
-            position = transfer['position'] or 2 ** 256 - 1
-            nonce = int(Web3.soliditySha3(['uint256', 'uint256'], [nonce, position]).toHex(), 16)
-
+            position = int(transfer['position']) if transfer['position'] else 2 ** 256 - 1
+            nonce = int(remove_0x_prefix(Web3.soliditySha3(['uint256', 'uint256'], [position, nonce]).hex()), 16)
         is_sender = is_same_hex(transfer['wallet']['address'], self.wallet_address) and \
             is_same_hex(transfer['wallet']['token'], self.token_address)
-
-        target = self.wallet_address if is_sender else transfer['recipient']['wallet']
+        target = self.wallet_address if not is_sender else transfer['recipient']['address']
         target_hash = Web3.soliditySha3(['address'], [target])
-
         return Web3.soliditySha3(['bytes32', 'uint256', 'uint64', 'uint256'],
-                                 [target_hash, transfer['amount'], transfer['recipient_trail_identifier'], nonce]).hex()
+                                 [target_hash, int(transfer['amount']), transfer['recipient_trail_identifier'], nonce]).hex()
 
     def swap_transfer_hash(self, transfer) -> str:
         sender_token_hash = Web3.soliditySha3(['address'], [transfer['wallet']['token']])
         recipient_token_hash = Web3.soliditySha3(['address'], [transfer['recipient']['token']])
-
         return Web3.soliditySha3(['bytes32', 'bytes32', 'uint64', 'uint256', 'uint256', 'uint256', 'uint256'],
                                  [sender_token_hash, recipient_token_hash, transfer['recipient_trail_identifier'],
                                   transfer['amount'], transfer['amount_swapped'],
                                   self.starting_balance(self.current_eon), transfer['nonce']])
 
     def transfer_hash(self, transfer) -> str:
-        if transfer['is_padding']:
+        if 'padding' in transfer and transfer['is_padding']:
             return EMPTY_HASH
 
-        is_swap = transfer['amount_swapped']
+        is_swap = int(transfer['amount_swapped'])
         if is_swap:
             return self.swap_transfer_hash(transfer)
         else:
@@ -172,7 +168,7 @@ class LQDWallet():
         wallet_address_hash = Web3.soliditySha3(['address'], [self.wallet_address])
         transaction_set_hash = self.calculate_tx_set_hash(self.current_eon.transfers)
         state_amount = self.spent_and_gained(self.current_eon)
-        self.logger().info(state_amount['spent'], state_amount['gained'])
+        self.logger().info(f"Active State => {[self.contract_address,self.token_address, self.wallet_address, self.trail_identifier, self.current_eon.eon_number, transaction_set_hash, state_amount['spent'], state_amount['gained']]}")
         return Web3.soliditySha3(['bytes32', 'bytes32', 'bytes32', 'uint64', 'uint256',
                                   'bytes32', 'uint256', 'uint256'],
                                  [contract_address_hash, token_address_hash, wallet_address_hash,
@@ -180,8 +176,9 @@ class LQDWallet():
                                   state_amount['spent'], state_amount['gained']])
 
     def calculate_tx_set_hash(self, transfers) -> str:
-        # filter out incoming and passive transfers
-        transfers = [transfer for transfer in transfers if not transfer['passive'] and not is_same_hex(transfer['recipient']['address'], self.wallet_address)]
+        # filter out incoming passive transfers
+        transfers = [transfer for transfer in transfers if not transfer['passive'] or not is_same_hex(transfer['recipient']['address'], self.wallet_address)]
+        self.logger().info(f"Transfers => {transfers}")
         if len(transfers) > 0:
             padding_length = next_power_of_2(len(transfers)) - len(transfers)
             transfers += [{'is_padding': True}] * padding_length

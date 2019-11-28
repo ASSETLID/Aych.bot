@@ -335,7 +335,7 @@ cdef class TEXMarket(MarketBase):
         sender_eth_wallet = self.wallet if sub_account_index is None else self._eth_sub_wallets[sub_account_index]
         new_transfer = {'id': 0,
                         'amount': str(int(amount)),
-                        'amount_swapped': '0',
+                        'amount_swapped': None,
                         'wallet': {'address': sender_address,
                                    'token': token_address},
                         'recipient': {'address': recipient_address,
@@ -348,23 +348,20 @@ cdef class TEXMarket(MarketBase):
                         'processed': False, 'complete': False, 'voided': False, 'cancelled': False, 'appended': False,
                         'matched_amounts': {'in': '0', 'out': '0', 'matched_in': '0', 'matched_out': '0'}
                         }
-        wallet_copy = sender_wallet
-        wallet_copy.current_eon.transfers.append(new_transfer)
-        active_state_hash = wallet_copy.active_state_hash()
+        sender_wallet.current_eon.transfers.append(new_transfer)
+        active_state_hash = sender_wallet.active_state_hash()
         balance_marker = hash_balance_marker(contract_address = CONTRACT_ADDRESS, token_address = token_address,
                                              wallet_address = sender_address, eon_number = sender_wallet.current_eon.eon_number,
                                              balance = sender_balance - int(amount))
 
         active_state_signature = sign_data(active_state_hash.hex(), sender_eth_wallet.private_key)
         balance_marker_signature = sign_data(balance_marker.hex(), sender_eth_wallet.private_key)
-
         transfer = await post_transfer(wallet_address = sender_address,
                                        token_address = token_address,
                                        active_state_signature = active_state_signature.hex(),
                                        balance_marker_signature = balance_marker_signature.hex(),
                                        wallet_balance = str(sender_balance - int(amount)),
-                                       transfer = new_transfer,
-                                       logger = self.logger)
+                                       transfer = new_transfer)
         return transfer
 
     async def start_network(self):
