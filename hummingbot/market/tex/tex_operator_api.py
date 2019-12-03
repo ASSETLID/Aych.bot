@@ -4,6 +4,7 @@ from typing import (
     Dict,
 )
 from .tex_utils import (remove_0x_prefix)
+from hummingbot.market.tex.lqd_wallet import LQDWallet
 OPERATOR_URL = 'https://rinkeby.liquidity.network'
 
 
@@ -64,4 +65,46 @@ async def post_transfer(wallet_address: str,
             if response.status != 201:
                 raise IOError(f"Error sending transfer: {response.status}")
             data: Dict[str, any] = await response.json()
+            return data
+
+
+async def post_swap(credit_wallet: LQDWallet,
+                    debit_wallet: LQDWallet,
+                    credit_amount: str,
+                    debit_amount: str,
+                    credit_signatures: [str],
+                    debit_signatures: [str],
+                    credit_balance_signatures: [str],
+                    debit_balance_signatures: [str],
+                    fulfillment_signatures: [str],
+                    eon_number: int,
+                    nonce: str,
+                    logger):
+    data = {
+        "wallet": {
+            "address": remove_0x_prefix(debit_wallet.wallet_address),
+            "token": remove_0x_prefix(debit_wallet.token_address),
+        },
+        "recipient": {
+            "address": remove_0x_prefix(credit_wallet.wallet_address),
+            "token": remove_0x_prefix(credit_wallet.token_address),
+        },
+        "amount": debit_amount,
+        "amount_swapped": credit_amount,
+        "nonce": nonce,
+        "eon_number": eon_number,
+        "credit_signature": map(lambda signature: {"value": signature}, credit_signatures),
+        "debit_signature": map(lambda signature: {"value": signature}, debit_signatures),
+        "credit_balance_signature": map(lambda signature: {"value": signature}, credit_balance_signatures),
+        "debit_balance_signature": map(lambda signature: {"value": signature}, debit_balance_signatures),
+        "fulfillment_signature": map(lambda signature: {"value": signature}, fulfillment_signatures),
+    }
+    async with aiohttp.ClientSession() as client:
+        headers = {'content-type': 'application/json'}
+        async with client.post(f"{OPERATOR_URL}/swap/", data = ujson.dumps(data), headers = headers) as response:
+            response: aiohttp.ClientResponse = response
+            # if response.status != 201:
+            #     raise IOError(f"Error sending swap: {response.status}")
+            data: Dict[str, any] = await response.json()
+            logger().info(f"RESPONSE ==> {data}")
             return data
