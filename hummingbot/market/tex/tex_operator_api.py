@@ -103,8 +103,54 @@ async def post_swap(credit_wallet: LQDWallet,
         headers = {'content-type': 'application/json'}
         async with client.post(f"{OPERATOR_URL}/swap/", data = ujson.dumps(data), headers = headers) as response:
             response: aiohttp.ClientResponse = response
-            # if response.status != 201:
-            #     raise IOError(f"Error sending swap: {response.status}")
             data: Dict[str, any] = await response.json()
-            logger().info(f"RESPONSE ==> {data}")
+            logger().info(f"RESPONSE => {data}")
+            if response.status != 201:
+                raise IOError(f"Error sending swap: {response.status}")
+            return data
+
+
+async def post_swap_freezing(freezing_signature: str, swap_id: int, logger):
+    data = {
+        "freezing_signature": {"value": remove_0x_prefix(freezing_signature)}
+    }
+    async with aiohttp.ClientSession() as client:
+        headers = {'content-type': 'application/json'}
+        async with client.put(f"{OPERATOR_URL}/swap/{swap_id}/freeze", data = ujson.dumps(data), headers = headers) as response:
+            response: aiohttp.ClientResponse = response
+            data: Dict[str, any] = await response.json()
+            logger().info(f"RESPONSE => {data}")
+            if response.status != 200:
+                raise IOError(f"Error freezing swap: {response.status}")
+            return data
+
+
+async def post_swap_cancellation(sender_cancellation_signatures: [str], recipient_cancellation_signatures: [str], swap_id: int, logger):
+    data = {
+        "sender_cancellation_signature": [{"value": remove_0x_prefix(signature)} for signature in sender_cancellation_signatures],
+        "recipient_cancellation_signature": [{"value": remove_0x_prefix(signature)} for signature in recipient_cancellation_signatures]
+    }
+    async with aiohttp.ClientSession() as client:
+        headers = {'content-type': 'application/json'}
+        async with client.put(f"{OPERATOR_URL}/swap/{swap_id}/cancel", data = ujson.dumps(data), headers = headers) as response:
+            response: aiohttp.ClientResponse = response
+            data: Dict[str, any] = await response.json()
+            logger().info(f"RESPONSE => {data}")
+            if response.status != 200:
+                raise IOError(f"Error freezing swap: {response.status}")
+            return data
+
+
+async def post_swap_finalization(finalization_signatures: [str], swap_id: int, logger):
+    data = {
+        "finalization_signature": [{"value": remove_0x_prefix(signature)} for signature in finalization_signatures]
+    }
+    async with aiohttp.ClientSession() as client:
+        headers = {'content-type': 'application/json'}
+        async with client.put(f"{OPERATOR_URL}/swap/{swap_id}/finalize", data = ujson.dumps(data), headers = headers) as response:
+            response: aiohttp.ClientResponse = response
+            data: Dict[str, any] = await response.json()
+            logger().info(f"RESPONSE => {data}")
+            if response.status != 200:
+                raise IOError(f"Error finalizing swap: {response.status}")
             return data

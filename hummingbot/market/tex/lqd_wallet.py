@@ -30,6 +30,7 @@ class LQDWallet():
     def __init__(self,
                  token_address: str,
                  wallet_address: str,
+                 private_key: str,
                  contract_address: str,
                  trail_identifier: int,
                  current_eon: LQDEon,
@@ -39,6 +40,7 @@ class LQDWallet():
         self._previous_eon = previous_eon
         self._token_address = token_address
         self._wallet_address = wallet_address
+        self._private_key = private_key
         self._contract_address = contract_address
         self._trail_identifier = trail_identifier
         self._ws_stream = ws_stream
@@ -59,6 +61,10 @@ class LQDWallet():
     @property
     def wallet_address(self) -> str:
         return self._wallet_address
+
+    @property
+    def private_key(self) -> str:
+        return self._private_key
 
     @property
     def contract_address(self) -> str:
@@ -101,8 +107,9 @@ class LQDWallet():
                 gained = int(last_transfer[ActiveStateType.SENDER]['updated_gains']) + int(last_transfer['amount']) - current_matched_out
                 return {'spent': spent, 'gained': gained}
             else:
-                spent = int(last_transfer[ActiveStateType.SENDER]['updated_spendings'])
-                gained = int(last_transfer[ActiveStateType.SENDER]['updated_gains'] + current_matched_in)
+                spent = int(last_transfer[ActiveStateType.RECIPIENT]['updated_spendings'])
+                gained = int(last_transfer[ActiveStateType.RECIPIENT]['updated_gains']) + current_matched_in
+                return {'spent': spent, 'gained': gained}
         else:
             last_transfer_active_state = self.transfer_active_state(last_transfer)
             spent = int(last_transfer_active_state['updated_spendings'])
@@ -328,10 +335,11 @@ class LQDWallet():
             self.current_eon = LQDEon(transfers, deposits, withdrawals, merkle_proof, eon_number)
 
     def clone(self):
-        return LQDWallet(self.token_address,
-                         self.wallet_address,
-                         self.contract_address,
-                         self.trail_identifier,
-                         deepcopy(self.current_eon),
-                         deepcopy(self.previous_eon),
-                         self._ws_stream)
+        return LQDWallet(token_address = self.token_address,
+                         wallet_address = self.wallet_address,
+                         private_key = self.private_key,
+                         contract_address = self.contract_address,
+                         trail_identifier = self.trail_identifier,
+                         current_eon = deepcopy(self.current_eon),
+                         previous_eon = deepcopy(self.previous_eon),
+                         ws_stream = self._ws_stream)

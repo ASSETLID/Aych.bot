@@ -48,10 +48,20 @@ from hummingbot.market.market_base import (
 from hummingbot.market.tex.lqd_wallet import LQDWallet
 from hummingbot.market.tex.lqd_eon import LQDEon
 from hummingbot.market.tex.lqd_wallet_sync import LQDWalletSync
-from hummingbot.market.tex.tex_operator_api import (get_current_eon, get_wallet_data, get_registration_data, post_transfer, post_swap)
+from hummingbot.market.tex.tex_operator_api import (get_current_eon,
+                                                    get_wallet_data,
+                                                    get_registration_data,
+                                                    post_transfer, post_swap,
+                                                    post_swap_freezing,
+                                                    post_swap_cancellation,
+                                                    post_swap_finalization)
 from hummingbot.market.tex.tex_order_book_tracker import TEXOrderBookTracker
 from hummingbot.market.tex.tex_in_flight_order import TEXInFlightOrder
-from hummingbot.market.tex.tex_utils import (sign_data, generate_seed, hash_balance_marker, remove_0x_prefix)
+from hummingbot.market.tex.tex_utils import (sign_data,
+                                             generate_seed,
+                                             hash_balance_marker,
+                                             remove_0x_prefix,
+                                             swap_freeze_hash)
 from hummingbot.market.tex.tex_crypto import HDPrivateKey, HDKey
 from hummingbot.core.network_iterator import NetworkStatus
 from hummingbot.core.data_type.order_book_tracker import OrderBookTrackerDataSourceType
@@ -214,13 +224,13 @@ cdef class TEXMarket(MarketBase):
             self._account_balances = total_balances
             self._last_update_balances_timestamp = current_timestamp
 
-    async def _create_wallet(self, wallet_address: str, token_address: str, eon_number: int) -> LQDWallet:
+    async def _create_wallet(self, wallet_address: str, private_key: str, token_address: str, eon_number: int) -> LQDWallet:
         wallet_data = await get_wallet_data(wallet_address = wallet_address, token_address = token_address, eon_number = eon_number)
         trail_identifier = wallet_data['registration']['trail_identifier']
         previous_eon = None if wallet_data['registration']['eon_number'] == eon_number else self._init_eon(wallet_data, eon_number - 1)
         current_eon = self._init_eon(wallet_data, eon_number)
         ws_stream = await self._lqd_wallet_sync.subscribe_wallet(wallet_address = wallet_address, token_address = token_address)
-        lqd_wallet = LQDWallet(token_address = token_address, wallet_address = wallet_address,
+        lqd_wallet = LQDWallet(token_address = token_address, wallet_address = wallet_address, private_key = private_key,
                                contract_address = CONTRACT_ADDRESS, trail_identifier = trail_identifier,
                                current_eon = current_eon, previous_eon = previous_eon, ws_stream = ws_stream)
 
@@ -255,12 +265,26 @@ cdef class TEXMarket(MarketBase):
         current_eon = await get_current_eon()
         markets = await self.get_active_exchange_markets()
         all_wallets_addresses = [self.wallet.address, *[account['address'] for account in self._eth_sub_wallets]]
-        for address in all_wallets_addresses:
+
+        # Creating main wallet
+        for symbol in self._trading_pairs:
+            market = markets.loc[symbol]
+            base_token = market.baseAssetAddress
+            quote_token = market.quoteAssetAddress
+            await safe_gather(*[self._create_wallet(self.wallet.address,
+                                                    self.wallet.private_key,
+                                                    token_address,
+                                                    current_eon) for token_address in [base_token, quote_token]])
+        # Creating sub wallets
+        for sub_wallet in self._eth_sub_wallets:
             for symbol in self._trading_pairs:
                 market = markets.loc[symbol]
                 base_token = market.baseAssetAddress
                 quote_token = market.quoteAssetAddress
-                await safe_gather(*[self._create_wallet(address, token_address, current_eon) for token_address in [base_token, quote_token]])
+                await safe_gather(*[self._create_wallet(sub_wallet['address'],
+                                                        sub_wallet['private_key'],
+                                                        token_address,
+                                                        current_eon) for token_address in [base_token, quote_token]])
 
     async def _get_lqd_balances(self):
         main_wallet_address = self.wallet.address
@@ -283,57 +307,65 @@ cdef class TEXMarket(MarketBase):
         total_balances = available_balances
         return available_balances, total_balances
 
-    async def _process_sub_wallet(self, sub_wallet: LQDWallet, token_address: str):
+    async def _process_sub_wallet(self, sub_wallet: LQDWallet):
         is_used = False
         non_finalized_swaps = []
-        for transfer in sub_wallet.current_eon.transfers:
+        swap_transfers = [transfer for transfer in sub_wallet.current_eon.transfers if transfer["amount_swapped"]]
+        for transfer in swap_transfers:
             is_tx_pending = not transfer["complete"] and not transfer["cancelled"] and not transfer["voided"]
             no_cancellation_state = transfer["cancelled"] and not transfer["sender_cancellation_active_state"]
             if is_tx_pending or no_cancellation_state:
                 is_used = True
-            if transfer["recipient"]["token"] == token_address and transfer["complete"] and not transfer["recipient_finalization_active_state"]:
+            if transfer["recipient"]["token"] == sub_wallet.token_address and transfer["complete"] and not transfer["recipient_finalization_active_state"]:
                 non_finalized_swaps.append(transfer)
 
         # TODO: Finalize swaps here
         # TODO: Harvest free sub wallets
+        for swap in non_finalized_swaps:
+            self.logger().info(f"Finalizing => Swap: {swap}")
+            await self._finalize_swap(swap)
+
+        if not is_used:
+            await self._harvest_sub_wallet(sub_wallet)
+
         return is_used
 
-    async def _sync_sub_wallets(self):
+    async def _sync_sub_wallets(self, first_sync: bool = False):
         markets = await self.get_active_exchange_markets()
         # TODO: Handle multple pairs (Currently handling only one token pair)
         trading_pair = self._trading_pairs[0]
         market = markets.loc[trading_pair]
         tokens = [market.baseAssetAddress, market.quoteAssetAddress]
-        self._sub_wallets_status["available"] = []
-        self._sub_wallets_status["blocked"] = []
-        for index, eth_sub_wallet in enumerate(self._eth_sub_wallets):
+
+        if first_sync:
+            self._sub_wallets_status["blocked"] = [index for index in range(SUB_WALLET_COUNT)]
+        for index in self._sub_wallets_status["blocked"]:
+            eth_sub_wallet = self._eth_sub_wallets[index]
             is_account_free = True
             for token in tokens:
                 sub_wallet_address = eth_sub_wallet["address"]
                 sub_wallet = self._wallet_map[f"{token}/{sub_wallet_address}"]
-                is_used = await self._process_sub_wallet(sub_wallet, token)
+                is_used = await self._process_sub_wallet(sub_wallet)
                 if is_used:
                     is_account_free = False
             if is_account_free:
+                self._sub_wallets_status["blocked"].remove(index)
                 self._sub_wallets_status["available"].append(index)
-            else:
-                self._sub_wallets_status["blocked"].append(index)
 
         # Sort swap wallets
         self._sub_wallets_status["available"].sort()
         self._sub_wallets_status["blocked"].sort()
+        self.logger().info(f"Sub Wallets Status: {self._sub_wallets_status}")
 
     async def _send_transfer(self,
                              sender_address: str,
                              recipient_address: str,
                              amount: int,
-                             token_address: str,
-                             sender_sub_wallet_index: int = None):
+                             token_address: str):
         sender_wallet = self._wallet_map[f"{token_address}/{sender_address}"]
         sender_balance = sender_wallet.balance(sender_wallet.current_eon)
         recipient_registration = await get_registration_data(recipient_address, token_address)
         nonce = random.randint(1, 999999)
-        sender_eth_wallet = {'address': self.wallet.address, 'private_key': self.wallet.private_key} if sender_sub_wallet_index is None else self._eth_sub_wallets[sender_sub_wallet_index]
         new_transfer = {'id': 0,
                         'amount': str(int(amount)),
                         'amount_swapped': None,
@@ -357,8 +389,8 @@ cdef class TEXMarket(MarketBase):
                                              wallet_address = sender_address, eon_number = sender_wallet.current_eon.eon_number,
                                              balance = sender_balance - int(amount))
 
-        active_state_signature = sign_data(active_state_hash.hex(), sender_eth_wallet['private_key'])
-        balance_marker_signature = sign_data(balance_marker.hex(), sender_eth_wallet['private_key'])
+        active_state_signature = sign_data(active_state_hash.hex(), sender_wallet.private_key)
+        balance_marker_signature = sign_data(balance_marker.hex(), sender_wallet.private_key)
         transfer = await post_transfer(wallet_address = sender_address,
                                        token_address = token_address,
                                        active_state_signature = active_state_signature.hex(),
@@ -366,6 +398,10 @@ cdef class TEXMarket(MarketBase):
                                        wallet_balance = str(sender_balance - int(amount)),
                                        transfer = new_transfer)
         # Append transfer to wallet
+        transfer['recipient'] = {'address': transfer['recipient'], 'token': transfer['wallet']['token']}
+        transfer['amount_swapped'] = None
+        transfer['cancelled'] = False
+        transfer['voided'] = False
         sender_wallet.current_eon.transfers.append(transfer)
         return transfer
 
@@ -374,7 +410,7 @@ cdef class TEXMarket(MarketBase):
             raise Exception('Swap limit reached!')
 
         swap_wallet_index = self._sub_wallets_status["available"].pop(0)
-        self._sub_wallets_status["blocked"].append(swap_wallet_index)
+
         # Get Swap Sub Wallets
         swap_eth_wallet = self._eth_sub_wallets[swap_wallet_index]
         self.logger().info(f"**Swap eth wallet => {swap_eth_wallet}")
@@ -387,45 +423,47 @@ cdef class TEXMarket(MarketBase):
         if fund_amount > 0:
             await self._send_transfer(self.wallet.address, swap_eth_wallet['address'], fund_amount, debit_token)
         elif fund_amount < 0:
-            await self._send_transfer(swap_eth_wallet['address'], self.wallet.address, abs(fund_amount), debit_token, swap_wallet_index)
+            await self._send_transfer(swap_eth_wallet['address'], self.wallet.address, abs(fund_amount), debit_token)
 
-        self.logger().info(f"**Generating Hashes")
-        # nonce = random.randint(1, 999999)
-        nonce = 12345
-        hashes = self._generate_new_swap_hashes(credit_amount, debit_amount, credit_wallet, debit_wallet, nonce)
-        self.logger().info(f"**Hashes Generated => {hashes}")
-        credit_signatures = list(map(lambda c_hash: remove_0x_prefix(sign_data(c_hash.hex(), swap_eth_wallet['private_key']).hex()), hashes['credit_active_states']))
-        debit_signatures = list(map(lambda d_hash: remove_0x_prefix(sign_data(d_hash.hex(), swap_eth_wallet['private_key']).hex()), hashes['debit_active_states']))
-        fulfillment_signatures = list(map(lambda f_hash: remove_0x_prefix(sign_data(f_hash.hex(), swap_eth_wallet['private_key']).hex()), hashes['fulfillment_active_states']))
-        credit_balance_signatures = list(map(lambda c_b_hash: remove_0x_prefix(sign_data(c_b_hash.hex(), swap_eth_wallet['private_key']).hex()), hashes['credit_balance_markers']))
-        debit_balance_signatures = list(map(lambda d_b_hash: remove_0x_prefix(sign_data(d_b_hash.hex(), swap_eth_wallet['private_key']).hex()), hashes['debit_balance_markers']))
+        nonce = random.randint(1, 999999)
+        hashes = self._swap_creation_hashes(credit_amount, debit_amount, credit_wallet, debit_wallet, nonce)
+        credit_signatures = list(map(lambda c_hash: remove_0x_prefix(sign_data(c_hash.hex(), debit_wallet.private_key).hex()), hashes['credit_active_states']))
+        debit_signatures = list(map(lambda d_hash: remove_0x_prefix(sign_data(d_hash.hex(), debit_wallet.private_key).hex()), hashes['debit_active_states']))
+        fulfillment_signatures = list(map(lambda f_hash: remove_0x_prefix(sign_data(f_hash.hex(), debit_wallet.private_key).hex()), hashes['fulfillment_active_states']))
+        credit_balance_signatures = list(map(lambda c_b_hash: remove_0x_prefix(sign_data(c_b_hash.hex(), debit_wallet.private_key).hex()), hashes['credit_balance_markers']))
+        debit_balance_signatures = list(map(lambda d_b_hash: remove_0x_prefix(sign_data(d_b_hash.hex(), debit_wallet.private_key).hex()), hashes['debit_balance_markers']))
 
-        self.logger().info(f"##--DONE--##")
-        swap = await post_swap(credit_wallet = credit_wallet,
-                               debit_wallet = debit_wallet,
-                               credit_amount = str(credit_amount),
-                               debit_amount = str(debit_amount),
-                               credit_signatures = credit_signatures,
-                               debit_signatures = debit_signatures,
-                               credit_balance_signatures = credit_balance_signatures,
-                               debit_balance_signatures = debit_balance_signatures,
-                               fulfillment_signatures = fulfillment_signatures,
-                               eon_number = credit_wallet.current_eon.eon_number,
-                               nonce = str(nonce),
-                               logger = self.logger)
+        try:
+            swap = await post_swap(credit_wallet = credit_wallet,
+                                   debit_wallet = debit_wallet,
+                                   credit_amount = str(credit_amount),
+                                   debit_amount = str(debit_amount),
+                                   credit_signatures = credit_signatures,
+                                   debit_signatures = debit_signatures,
+                                   credit_balance_signatures = credit_balance_signatures,
+                                   debit_balance_signatures = debit_balance_signatures,
+                                   fulfillment_signatures = fulfillment_signatures,
+                                   eon_number = credit_wallet.current_eon.eon_number,
+                                   nonce = str(nonce),
+                                   logger = self.logger)
 
-        # Append swap to credit/debit transfers
-        credit_wallet.current_eon.transfers.append(swap)
-        debit_wallet.current_eon.transfers.append(swap)
+            self._sub_wallets_status["blocked"].append(swap_wallet_index)
+            # Append swap to credit/debit transfers
+            swap['matched_amounts'] = {'in': 0, 'out': 0}
+            swap['cancelled'] = False
+            swap['voided'] = False
+            credit_wallet.current_eon.transfers.append(swap)
+            debit_wallet.current_eon.transfers.append(swap)
+            return swap
+        except Exception:
+            self._sub_wallets_status["available"].append(swap_wallet_index)
 
-        return swap
-
-    def _generate_new_swap_hashes(self,
-                                  credit_amount: Decimal,
-                                  debit_amount: Decimal,
-                                  credit_wallet: LQDWallet,
-                                  debit_wallet: LQDWallet,
-                                  nonce: int):
+    def _swap_creation_hashes(self,
+                              credit_amount: Decimal,
+                              debit_amount: Decimal,
+                              credit_wallet: LQDWallet,
+                              debit_wallet: LQDWallet,
+                              nonce: int):
 
         credit_starting_balance = credit_wallet.starting_balance(credit_wallet.current_eon)
         debit_starting_balance = debit_wallet.starting_balance(debit_wallet.current_eon)
@@ -443,6 +481,7 @@ cdef class TEXMarket(MarketBase):
                 debit_new_eon = LQDEon([], [], [], {}, current_eon_number + i)
                 current_credit_wallet = LQDWallet(token_address = credit_wallet.token_address,
                                                   wallet_address = credit_wallet.wallet_address,
+                                                  private_key = credit_wallet.private_key,
                                                   contract_address = CONTRACT_ADDRESS,
                                                   trail_identifier = credit_wallet.trail_identifier,
                                                   current_eon = credit_new_eon,
@@ -450,6 +489,7 @@ cdef class TEXMarket(MarketBase):
                                                   ws_stream = None)
                 current_debit_wallet = LQDWallet(token_address = debit_wallet.token_address,
                                                  wallet_address = debit_wallet.wallet_address,
+                                                 private_key = debit_wallet.private_key,
                                                  contract_address = CONTRACT_ADDRESS,
                                                  trail_identifier = debit_wallet.trail_identifier,
                                                  current_eon = debit_new_eon,
@@ -545,6 +585,145 @@ cdef class TEXMarket(MarketBase):
                 'credit_balance_markers': credit_balance_marker_hashes,
                 'debit_balance_markers': debit_balance_marker_hashes}
 
+    async def _cancel_swap(self, swap):
+        debit_address = swap['wallet']['address']
+        debit_token = swap['wallet']['token']
+        credit_token = swap['recipient']['token']
+        debit_wallet = self._wallet_map[f"{debit_token}/{debit_address}"]
+        eth_sub_wallet = [wallet for wallet in self._eth_sub_wallets if wallet['address'] == debit_address][0]
+
+        freeze_hash = swap_freeze_hash(debit_token, credit_token, int(swap['nonce']))
+        freeze_signature = sign_data(freeze_hash.hex(), debit_wallet.private_key).hex()
+        self.logger().info(f"Posting freeze signatures")
+        # await post_swap_freezing(freeze_signature, swap['id'], self.logger)
+        self.logger().info(f"Swap Frozen")
+        hashes = self._swap_cancellation_hashes(swap)
+        debit_cancellation_signatures = [sign_data(state_hash.hex(), debit_wallet.private_key).hex() for state_hash in hashes['debit_cancellation_hashes']]
+        credit_cancellation_signatures = [sign_data(state_hash.hex(), debit_wallet.private_key).hex() for state_hash in hashes['credit_cancellation_hashes']]
+
+        await post_swap_cancellation(debit_cancellation_signatures,
+                                     credit_cancellation_signatures,
+                                     swap['id'],
+                                     self.logger)
+
+    def _swap_cancellation_hashes(self, swap):
+        debit_cancellation_hashes = []
+        credit_cancellation_hashes = []
+
+        debit_address = swap['wallet']['address']
+        debit_token = swap['wallet']['token']
+        credit_address = swap['recipient']['address']
+        credit_token = swap['recipient']['token']
+
+        debit_wallet = self._wallet_map[f"{debit_token}/{debit_address}"]
+        credit_wallet = self._wallet_map[f"{credit_token}/{credit_address}"]
+
+        current_eon_number = swap['eon_number']
+        swap_matched_out = int(swap['matched_amounts']['out'])
+        swap_debit_amount = int(swap['amount'])
+        swap_credit_amount = int(swap['amount_swapped'])
+
+        debit_spent_gained = debit_wallet.spent_and_gained()
+        debit_spent = debit_spent_gained['spent']
+        debit_gained = debit_spent_gained['gained'] + swap_debit_amount - swap_matched_out
+        debit_cancellation_hash = debit_wallet.active_state_hash(spent = debit_spent, gained = debit_gained, eon_number = current_eon_number)
+
+        credit_spent_gained = credit_wallet.spent_and_gained()
+        credit_spent = credit_spent_gained['spent']
+        credit_gained = credit_spent_gained['gained']
+        credit_cancellation_hash = credit_wallet.active_state_hash(spent = credit_spent + swap_credit_amount, gained = credit_gained + swap_credit_amount, eon_number = current_eon_number)
+
+        debit_cancellation_hashes.append(debit_cancellation_hash)
+        credit_cancellation_hashes.append(credit_cancellation_hash)
+
+        # TODO: Calculate the eons left for this swap
+        for i in range(1, 5):
+            credit_new_eon = LQDEon([], [], [], {}, current_eon_number + i)
+            debit_new_eon = LQDEon([], [], [], {}, current_eon_number + i)
+            future_credit_wallet = LQDWallet(token_address = credit_wallet.token_address,
+                                             wallet_address = credit_wallet.wallet_address,
+                                             private_key = credit_wallet.private_key,
+                                             contract_address = CONTRACT_ADDRESS,
+                                             trail_identifier = credit_wallet.trail_identifier,
+                                             current_eon = credit_new_eon,
+                                             previous_eon = None,
+                                             ws_stream = None)
+            future_debit_wallet = LQDWallet(token_address = debit_wallet.token_address,
+                                            wallet_address = debit_wallet.wallet_address,
+                                            private_key = debit_wallet.private_key,
+                                            contract_address = CONTRACT_ADDRESS,
+                                            trail_identifier = debit_wallet.trail_identifier,
+                                            current_eon = debit_new_eon,
+                                            previous_eon = None,
+                                            ws_stream = None)
+
+            future_debit_spent_gained = max(debit_spent, debit_gained) + 1
+            future_credit_spent_gained = max(credit_spent, credit_gained) + swap_credit_amount + 1
+
+            debit_cancellation_hash = future_debit_wallet.active_state_hash(spent = future_debit_spent_gained, gained = future_debit_spent_gained, eon_number = current_eon_number + i)
+            credit_cancellation_hash = future_credit_wallet.active_state_hash(spent = future_credit_spent_gained, gained = future_credit_spent_gained, eon_number = current_eon_number + i)
+
+            debit_cancellation_hashes.append(debit_cancellation_hash)
+            credit_cancellation_hashes.append(credit_cancellation_hash)
+
+        return {'debit_cancellation_hashes': debit_cancellation_hashes,
+                'credit_cancellation_hashes': credit_cancellation_hashes}
+
+    async def _finalize_swap(self, swap):
+        sub_wallet_address = swap['recipient']['address']
+        credit_token = swap['recipient']['token']
+        credit_wallet = self._wallet_map[f"{credit_token}/{sub_wallet_address}"]
+        finalization_hashes = self._swap_finalization_hashes(swap)
+        finalization_signatures = [sign_data(state_hash.hex(), credit_wallet.private_key).hex() for state_hash in finalization_hashes]
+
+        await post_swap_finalization(finalization_signatures,
+                                     swap['id'],
+                                     self.logger)
+
+    def _swap_finalization_hashes(self, swap):
+        finalization_hashes = []
+        credit_address = swap['recipient']['address']
+        credit_token = swap['recipient']['token']
+        swap_debit_amount = int(swap['amount'])
+        swap_credit_amount = int(swap['amount_swapped'])
+        current_eon_number = swap['eon_number']
+
+        credit_wallet = self._wallet_map[f"{credit_token}/{credit_address}"]
+        credit_spent_gained = credit_wallet.spent_and_gained()
+        finalization_hash = credit_wallet.active_state_hash(spent = credit_spent_gained['spent'] + swap_credit_amount,
+                                                            gained = credit_spent_gained['gained'] + swap_credit_amount,
+                                                            eon_number = current_eon_number)
+        finalization_hashes.append(finalization_hash)
+
+        for i in range(1, 5):
+            credit_new_eon = LQDEon([], [], [], {}, current_eon_number + i)
+            future_credit_wallet = LQDWallet(token_address = credit_wallet.token_address,
+                                             wallet_address = credit_wallet.wallet_address,
+                                             private_key = credit_wallet.private_key,
+                                             contract_address = CONTRACT_ADDRESS,
+                                             trail_identifier = credit_wallet.trail_identifier,
+                                             current_eon = credit_new_eon,
+                                             previous_eon = None,
+                                             ws_stream = None)
+
+            future_spent_gained = max(credit_spent_gained['spent'], credit_spent_gained['gained']) + swap_credit_amount + 1
+            future_finalization_hash = future_credit_wallet.active_state_hash(spent = future_spent_gained,
+                                                                              gained = future_spent_gained,
+                                                                              eon_number = current_eon_number + i)
+
+            finalization_hashes.append(future_finalization_hash)
+
+        return finalization_hashes
+
+    async def _harvest_sub_wallet(self, sub_wallet: LQDWallet):
+        balance = sub_wallet.balance()
+        if balance > 0:
+            self.logger().info("Harvesting...")
+            await self._send_transfer(sender_address = sub_wallet.wallet_address,
+                                      recipient_address = self.wallet.address,
+                                      amount = balance,
+                                      token_address = sub_wallet.token_address)
+
     async def start_network(self):
         print('starting network')
         if self._order_tracker_task is not None:
@@ -553,9 +732,10 @@ cdef class TEXMarket(MarketBase):
         self._lqd_wallet_sync_task = safe_ensure_future(self._lqd_wallet_sync.start())
         await self._init_LQD_wallets()
         await self._update_balances()
-        await self._sync_sub_wallets()
+        await self._sync_sub_wallets(first_sync = True)
         # await self._send_transfer(self.wallet.address, '0xDE9Aa519E2Ee3135D008920e6a85dda5EB91C9A1', 0.001, CONTRACT_ADDRESS)
         # await self._send_swap("0x66b26B6CeA8557D6d209B33A30D69C11B0993a3a", "0xA9F86DD014C001Acd72d5b25831f94FaCfb48717", 20000000000000, 1000000000000000)
+        # await self._cancel_swap(SWAP)
         self._order_tracker_task = safe_ensure_future(self._order_book_tracker.start())
         self._status_polling_task = safe_ensure_future(self._status_polling_loop())
 

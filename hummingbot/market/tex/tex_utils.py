@@ -66,3 +66,10 @@ def hash_balance_marker(contract_address: str, token_address: str, wallet_addres
     return Web3.soliditySha3(['bytes32', 'bytes32', 'bytes32', 'uint256', 'uint256'],
                              [contract_address_hash, token_address_hash, wallet_address_hash,
                               eon_number, balance])
+
+
+def swap_freeze_hash(debit_token: str, credit_token: str, nonce: int):
+    debit_token_hash = Web3.soliditySha3(['address'], [debit_token])
+    credit_token_hash = Web3.soliditySha3(['address'], [credit_token])
+
+    return Web3.soliditySha3(['bytes32', 'bytes32', 'uint256'], [debit_token_hash, credit_token_hash, nonce])
