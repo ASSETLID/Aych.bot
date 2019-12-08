@@ -191,13 +191,13 @@ cdef class TEXMarket(MarketBase):
     async def get_active_exchange_markets(self) -> pd.DataFrame:
         return await TEXAPIOrderBookDataSource.get_active_exchange_markets()
 
-    cdef OrderBook c_get_order_book(self, str symbol):
+    cdef OrderBook c_get_order_book(self, str trading_pair):
         cdef:
             dict order_books = self._order_book_tracker.order_books
 
-        if symbol not in order_books:
-            raise ValueError(f"No order book exists for '{symbol}'.")
-        return order_books[symbol]
+        if trading_pair not in order_books:
+            raise ValueError(f"No order book exists for '{trading_pair}'.")
+        return order_books[trading_pair]
 
     async def _status_polling_loop(self):
         while True:
@@ -267,8 +267,8 @@ cdef class TEXMarket(MarketBase):
         all_wallets_addresses = [self.wallet.address, *[account['address'] for account in self._eth_sub_wallets]]
 
         # Creating main wallet
-        for symbol in self._trading_pairs:
-            market = markets.loc[symbol]
+        for trading_pair in self._trading_pairs:
+            market = markets.loc[trading_pair]
             base_token = market.baseAssetAddress
             quote_token = market.quoteAssetAddress
             await safe_gather(*[self._create_wallet(self.wallet.address,
@@ -277,8 +277,8 @@ cdef class TEXMarket(MarketBase):
                                                     current_eon) for token_address in [base_token, quote_token]])
         # Creating sub wallets
         for sub_wallet in self._eth_sub_wallets:
-            for symbol in self._trading_pairs:
-                market = markets.loc[symbol]
+            for trading_pair in self._trading_pairs:
+                market = markets.loc[trading_pair]
                 base_token = market.baseAssetAddress
                 quote_token = market.quoteAssetAddress
                 await safe_gather(*[self._create_wallet(sub_wallet['address'],
@@ -783,43 +783,60 @@ cdef class TEXMarket(MarketBase):
         if order_type is OrderType.LIMIT:
             return TradeFee(percent=Decimal("0.00"))
 
-    cdef object c_get_order_price_quantum(self, str symbol, object price):
+    cdef object c_get_order_price_quantum(self, str trading_pair, object price):
         cdef:
             quote_asset_decimals = 18
         decimals_quantum = Decimal(f"1e-{quote_asset_decimals}")
         return decimals_quantum
 
-    cdef object c_get_order_size_quantum(self, str symbol, object amount):
+    cdef object c_get_order_size_quantum(self, str trading_pair, object amount):
         cdef:
             base_asset_decimals = 18
         decimals_quantum = Decimal(f"1e-{base_asset_decimals}")
         return decimals_quantum
 
-    def quantize_order_amount(self, symbol: str, amount: Decimal, price: Decimal = s_decimal_NaN) -> Decimal:
-        return self.c_quantize_order_amount(symbol, amount, price)
+    def quantize_order_amount(self, trading_pair: str, amount: Decimal, price: Decimal = s_decimal_NaN) -> Decimal:
+        return self.c_quantize_order_amount(trading_pair, amount, price)
 
-    cdef object c_quantize_order_amount(self, str symbol, object amount, object price=s_decimal_0):
-        quantized_amount = MarketBase.c_quantize_order_amount(self, symbol, amount)
-        actual_price = Decimal(price or self.get_price(symbol, True))
+    cdef object c_quantize_order_amount(self, str trading_pair, object amount, object price=s_decimal_0):
+        quantized_amount = MarketBase.c_quantize_order_amount(self, trading_pair, amount)
+        actual_price = Decimal(price or self.get_price(trading_pair, True))
         amount_quote = quantized_amount * actual_price
         return quantized_amount
     # TODO: To be implemented <<<<<<<<<<>>>>>>>>>>
-    cdef str c_buy(self, str symbol, object amount, object order_type=OrderType.MARKET, object price=s_decimal_NaN,
+    cdef str c_buy(self, str trading_pair, object amount, object order_type=OrderType.MARKET, object price=s_decimal_NaN,
                    dict kwargs={}):
         return ''
 
-    cdef str c_sell(self, str symbol, object amount, object order_type=OrderType.MARKET, object price=s_decimal_NaN,
+    cdef str c_sell(self, str trading_pair, object amount, object order_type=OrderType.MARKET, object price=s_decimal_NaN,
                     dict kwargs={}):
         return ''
 
-    cdef c_cancel(self, str symbol, str order_id):
+    cdef c_cancel(self, str trading_pair, str order_id):
         return ''
 
     async def cancel_all(self, timeout_seconds: float) -> List[CancellationResult]:
         return ''
 
-    async def execute_buy(self, symbol: str, amount: Decimal, price: Decimal, order_type: OrderType) -> str:
+    async def execute_buy(self, trading_pair: str, amount: Decimal, price: Decimal, order_type: OrderType) -> str:
         return ''
 
-    async def execute_sell(self, symbol: str, amount: Decimal, price: Decimal, order_type: OrderType) -> str:
+    async def execute_sell(self, trading_pair: str, amount: Decimal, price: Decimal, order_type: OrderType) -> str:
         return ''
+
+    cdef c_start_tracking_order(self,
+                                str client_order_id,
+                                str trading_pair,
+                                object trade_type,
+                                object order_type,
+                                object amount,
+                                object price):
+        self._in_flight_orders[client_order_id] = TEXInFlightOrder(
+            client_order_id=client_order_id,
+            exchange_order_id=None,
+            trading_pair=trading_pair,
+            order_type=order_type,
+            trade_type=trade_type,
+            price=price,
+            amount=amount
+        )
