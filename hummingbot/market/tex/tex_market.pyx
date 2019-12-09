@@ -337,8 +337,6 @@ cdef class TEXMarket(MarketBase):
             if transfer["recipient"]["token"] == sub_wallet.token_address and transfer["complete"] and not transfer["recipient_finalization_active_state"]:
                 non_finalized_swaps.append(transfer)
 
-        # TODO: Finalize swaps here
-        # TODO: Harvest free sub wallets
         for swap in non_finalized_swaps:
             self.logger().info(f"Finalizing => Swap: {swap}")
             await self._finalize_swap(swap)
@@ -350,7 +348,7 @@ cdef class TEXMarket(MarketBase):
 
     async def _sync_sub_wallets(self, first_sync: bool = False):
         markets = await self.get_active_exchange_markets()
-        # TODO: Handle multple pairs (Currently handling only one token pair)
+        # TODO: Handle multiple pairs in future(Currently handling only one token pair)
         trading_pair = self._trading_pairs[0]
         market = markets.loc[trading_pair]
         tokens = [market.baseAssetAddress, market.quoteAssetAddress]
