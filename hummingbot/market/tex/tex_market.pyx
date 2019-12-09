@@ -413,19 +413,23 @@ cdef class TEXMarket(MarketBase):
 
         active_state_signature = sign_data(active_state_hash.hex(), sender_wallet.private_key)
         balance_marker_signature = sign_data(balance_marker.hex(), sender_wallet.private_key)
-        transfer = await post_transfer(wallet_address = sender_address,
-                                       token_address = token_address,
-                                       active_state_signature = active_state_signature.hex(),
-                                       balance_marker_signature = balance_marker_signature.hex(),
-                                       wallet_balance = str(sender_balance - int(amount)),
-                                       transfer = new_transfer)
-        # Append transfer to wallet
-        transfer['recipient'] = {'address': transfer['recipient'], 'token': transfer['wallet']['token']}
-        transfer['amount_swapped'] = None
-        transfer['cancelled'] = False
-        transfer['voided'] = False
-        sender_wallet.current_eon.transfers.append(transfer)
-        return transfer
+        try:
+            transfer = await post_transfer(wallet_address = sender_address,
+                                           token_address = token_address,
+                                           active_state_signature = active_state_signature.hex(),
+                                           balance_marker_signature = balance_marker_signature.hex(),
+                                           wallet_balance = str(sender_balance - int(amount)),
+                                           transfer = new_transfer)
+            # Append transfer to wallet
+            transfer['recipient'] = {'address': transfer['recipient'], 'token': transfer['wallet']['token']}
+            transfer['amount_swapped'] = None
+            transfer['cancelled'] = False
+            transfer['voided'] = False
+            sender_wallet.current_eon.transfers.append(transfer)
+            return transfer
+        except Exception as e:
+            self.logging().error(f'Error occurred while trying to transfer, {e.__class__}: {e}')
+            raise e
 
     async def _send_swap(self, credit_token: str, debit_token: str, credit_amount: int, debit_amount: int):
         if len(self._sub_wallets_status["available"]) == 0:
@@ -478,6 +482,7 @@ cdef class TEXMarket(MarketBase):
             debit_wallet.current_eon.transfers.append(swap)
             return swap
         except Exception as e:
+            self.logging().error(f'Error occurred while trying to swap, {e.__class__}: {e}')
             self._sub_wallets_status["available"].append(swap_wallet_index)
             raise e
 
@@ -623,11 +628,14 @@ cdef class TEXMarket(MarketBase):
         hashes = self._swap_cancellation_hashes(swap)
         debit_cancellation_signatures = [sign_data(state_hash.hex(), debit_wallet.private_key).hex() for state_hash in hashes['debit_cancellation_hashes']]
         credit_cancellation_signatures = [sign_data(state_hash.hex(), debit_wallet.private_key).hex() for state_hash in hashes['credit_cancellation_hashes']]
-
-        await post_swap_cancellation(debit_cancellation_signatures,
-                                     credit_cancellation_signatures,
-                                     swap['id'],
-                                     self.logger)
+        try:
+            await post_swap_cancellation(debit_cancellation_signatures,
+                                         credit_cancellation_signatures,
+                                         swap['id'],
+                                         self.logger)
+        except Exception as e:
+            self.logging().error(f'Error occurred while trying to cancel swap, {e.__class__}: {e}')
+            raise e
 
     def _swap_cancellation_hashes(self, swap):
         debit_cancellation_hashes = []
@@ -699,9 +707,13 @@ cdef class TEXMarket(MarketBase):
         finalization_hashes = self._swap_finalization_hashes(swap)
         finalization_signatures = [sign_data(state_hash.hex(), credit_wallet.private_key).hex() for state_hash in finalization_hashes]
 
-        await post_swap_finalization(finalization_signatures,
-                                     swap['id'],
-                                     self.logger)
+        try:
+            await post_swap_finalization(finalization_signatures,
+                                         swap['id'],
+                                         self.logger)
+        except Exception as e:
+            self.logging().error(f'Error occurred while trying to finalize swap, {e.__class__}: {e}')
+            raise e
 
     def _swap_finalization_hashes(self, swap):
         finalization_hashes = []
