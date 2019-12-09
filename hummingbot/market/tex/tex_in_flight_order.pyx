@@ -23,6 +23,7 @@ cdef class TEXInFlightOrder(InFlightOrderBase):
                  trade_type: TradeType,
                  price: Decimal,
                  amount: Decimal,
+                 swap = None,
                  initial_state: str = "NEW"):
         super().__init__(
             TEXMarket,
@@ -36,6 +37,7 @@ cdef class TEXInFlightOrder(InFlightOrderBase):
             initial_state
         )
         self.trade_id_set = set()
+        self._swap = swap
 
     def __repr__(self) -> str:
         return f"TEXInFlightOrder(" \
@@ -50,6 +52,10 @@ cdef class TEXInFlightOrder(InFlightOrderBase):
                f"executed_amount_quote={self.executed_amount_quote}, " \
                f"last_state='{self.last_state}', " \
                f"available_amount_base={self.available_amount_base}, " \
+
+    @property
+    def swap(self):
+        return self._swap
 
     @property
     def is_done(self) -> bool:

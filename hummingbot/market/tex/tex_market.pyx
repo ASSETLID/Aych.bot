@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import (defaultdict, OrderedDict)
 import aiohttp
 import asyncio
 from async_timeout import timeout
@@ -77,7 +77,7 @@ from web3 import Web3
 s_logger = None
 
 s_decimal_0 = Decimal(0)
-NETWORK= 'RINKEBY'
+NETWORK = 'RINKEBY'
 ETH_RPC_URL = 'https://rinkeby.infura.io/v3/9aed27c49d81418687a11e11aa00be0a'
 UPDATE_BALANCES_INTERVAL = 5
 SUB_WALLET_COUNT = 5
@@ -96,6 +96,16 @@ cdef class TEXMarketTransactionTracker(TransactionTracker):
         self._owner.c_did_timeout_tx(tx_id)
 
 cdef class TEXMarket(MarketBase):
+    MARKET_RECEIVED_ASSET_EVENT_TAG = MarketEvent.ReceivedAsset.value
+    MARKET_BUY_ORDER_COMPLETED_EVENT_TAG = MarketEvent.BuyOrderCompleted.value
+    MARKET_SELL_ORDER_COMPLETED_EVENT_TAG = MarketEvent.SellOrderCompleted.value
+    MARKET_WITHDRAW_ASSET_EVENT_TAG = MarketEvent.WithdrawAsset.value
+    MARKET_ORDER_CANCELLED_EVENT_TAG = MarketEvent.OrderCancelled.value
+    MARKET_TRANSACTION_FAILURE_EVENT_TAG = MarketEvent.TransactionFailure.value
+    MARKET_ORDER_FAILURE_EVENT_TAG = MarketEvent.OrderFailure.value
+    MARKET_ORDER_FILLED_EVENT_TAG = MarketEvent.OrderFilled.value
+    MARKET_BUY_ORDER_CREATED_EVENT_TAG = MarketEvent.BuyOrderCreated.value
+    MARKET_SELL_ORDER_CREATED_EVENT_TAG = MarketEvent.SellOrderCreated.value
 
     @classmethod
     def logger(cls) -> HummingbotLogger:
@@ -122,6 +132,7 @@ cdef class TEXMarket(MarketBase):
         self._last_timestamp = 0
         self._poll_interval = poll_interval
         self._in_flight_orders = {}
+        self._in_flight_cancels = OrderedDict()
         self._tx_tracker = TEXMarketTransactionTracker(self)
         self._data_source_type = order_book_tracker_data_source_type
         self._status_polling_task = None
@@ -147,9 +158,6 @@ cdef class TEXMarket(MarketBase):
         return {
             "account_balance": len(self._account_balances) > 0 if self._trading_required else True,
             "order_books_initialized": self._order_book_tracker.ready,
-            # TODO: Implement the following
-            "account_registered": False,
-            "sub_accounts_registered": False,
         }
 
     @property
@@ -291,6 +299,7 @@ cdef class TEXMarket(MarketBase):
         available_balances = {}
         total_balances = {}
         markets = await self.get_active_exchange_markets()
+
         for trading_pair in self._trading_pairs:
             market = markets.loc[trading_pair]
             base_token_address = market.baseAssetAddress
@@ -299,12 +308,21 @@ cdef class TEXMarket(MarketBase):
             quote_token = market.quoteAsset
             base_token_wallet = self._wallet_map[f"{base_token_address}/{main_wallet_address}"]
             quote_token_wallet = self._wallet_map[f"{quote_token_address}/{main_wallet_address}"]
-            base_token_balance = base_token_wallet.balance(base_token_wallet.current_eon)
-            quote_token_balance = quote_token_wallet.balance(quote_token_wallet.current_eon)
+            base_token_balance = base_token_wallet.balance()
+            quote_token_balance = quote_token_wallet.balance()
             available_balances[f"f{base_token}"] = Decimal(base_token_balance * 10.0 ** (-18.0))
             available_balances[f"f{quote_token}"] = Decimal(quote_token_balance * 10.0 ** (-18.0))
-        # TODO: Calculate total balance by adding the balance held in the sub wallets.
-        total_balances = available_balances
+            base_token_locked_balance = 0
+            quote_token_locked_balance = 0
+            for sub_wallet in self._eth_sub_wallets:
+                base_sub_wallet = self._wallet_map[f"{base_token_address}/{sub_wallet['address']}"]
+                quote_sub_wallet = self._wallet_map[f"{quote_token_address}/{sub_wallet['address']}"]
+                base_token_locked_balance += base_sub_wallet.balance()
+                quote_token_locked_balance += quote_sub_wallet.balance()
+            total_balances[f"f{base_token}"] = available_balances[f"f{base_token}"] + Decimal(base_token_locked_balance * 10.0 ** (-18.0))
+            total_balances[f"f{quote_token}"] = available_balances[f"f{quote_token}"] + Decimal(quote_token_locked_balance * 10.0 ** (-18.0))
+
+        self.logger().info(f"BALANCES => {available_balances}, TOTAL => {total_balances}")
         return available_balances, total_balances
 
     async def _process_sub_wallet(self, sub_wallet: LQDWallet):
@@ -363,7 +381,11 @@ cdef class TEXMarket(MarketBase):
                              amount: int,
                              token_address: str):
         sender_wallet = self._wallet_map[f"{token_address}/{sender_address}"]
-        sender_balance = sender_wallet.balance(sender_wallet.current_eon)
+        sender_balance = sender_wallet.balance()
+
+        if sender_balance < amount:
+            raise Exception('Insufficient Balance to send transfer')
+
         recipient_registration = await get_registration_data(recipient_address, token_address)
         nonce = random.randint(1, 999999)
         new_transfer = {'id': 0,
@@ -455,8 +477,9 @@ cdef class TEXMarket(MarketBase):
             credit_wallet.current_eon.transfers.append(swap)
             debit_wallet.current_eon.transfers.append(swap)
             return swap
-        except Exception:
+        except Exception as e:
             self._sub_wallets_status["available"].append(swap_wallet_index)
+            raise e
 
     def _swap_creation_hashes(self,
                               credit_amount: Decimal,
@@ -757,8 +780,8 @@ cdef class TEXMarket(MarketBase):
 
     cdef c_tick(self, double timestamp):
         cdef:
-            int64_t last_tick = <int64_t>(self._last_timestamp / self._poll_interval)
-            int64_t current_tick = <int64_t>(timestamp / self._poll_interval)
+            int64_t last_tick = <int64_t > (self._last_timestamp / self._poll_interval)
+            int64_t current_tick = <int64_t > (timestamp / self._poll_interval)
 
         self._tx_tracker.c_tick(timestamp)
         MarketBase.c_tick(self, timestamp)
@@ -780,8 +803,7 @@ cdef class TEXMarket(MarketBase):
                           object amount,
                           object price):
 
-        if order_type is OrderType.LIMIT:
-            return TradeFee(percent=Decimal("0.00"))
+        return TradeFee(percent=Decimal("0.00"))
 
     cdef object c_get_order_price_quantum(self, str trading_pair, object price):
         cdef:
@@ -799,33 +821,250 @@ cdef class TEXMarket(MarketBase):
         return self.c_quantize_order_amount(trading_pair, amount, price)
 
     cdef object c_quantize_order_amount(self, str trading_pair, object amount, object price=s_decimal_0):
-        quantized_amount = MarketBase.c_quantize_order_amount(self, trading_pair, amount)
-        actual_price = Decimal(price or self.get_price(trading_pair, True))
-        amount_quote = quantized_amount * actual_price
-        return quantized_amount
-    # TODO: To be implemented <<<<<<<<<<>>>>>>>>>>
-    cdef str c_buy(self, str trading_pair, object amount, object order_type=OrderType.MARKET, object price=s_decimal_NaN,
+        return MarketBase.c_quantize_order_amount(self, trading_pair, amount)
+
+    async def place_order(self,
+                          order_id: str,
+                          trading_pair: str,
+                          amount: Decimal,
+                          price: Decimal,
+                          is_buy: bool):
+
+        total_price = amount * price
+        credit_amount = amount if is_buy else total_price
+        debit_amount = total_price if is_buy else amount
+        markets = await self.get_active_exchange_markets()
+        market = markets.loc[trading_pair]
+        tokens = [market.baseAssetAddress, market.quoteAssetAddress]
+        credit_token = tokens[0] if is_buy else tokens[1]
+        debit_token = tokens[1] if is_buy else tokens[0]
+
+        order = await self._send_swap(credit_token = credit_token,
+                                      debit_token = debit_token,
+                                      credit_amount = int(credit_amount * 10 ** 18),
+                                      debit_amount = int(debit_amount * 10 ** 18))
+        return order
+
+    async def cancel_order(self, client_order_id: str):
+        order = self.in_flight_orders.get(client_order_id)
+        if not order:
+            self.logger().info(f"Failed to cancel order {client_order_id}. Order not found in tracked orders.")
+            if client_order_id in self._in_flight_cancels:
+                del self._in_flight_cancels[client_order_id]
+            return {}
+
+        swap = await self._cancel_swap(order.swap)
+        self.c_trigger_event(self.MARKET_ORDER_CANCELLED_EVENT_TAG,
+                             OrderCancelledEvent(self._current_timestamp, client_order_id))
+        return swap
+
+    cdef str c_buy(self,
+                   str trading_pair,
+                   object amount,
+                   object order_type=OrderType.MARKET,
+                   object price=s_decimal_0,
                    dict kwargs={}):
-        return ''
+        cdef:
+            int64_t tracking_nonce = <int64_t > (time.time() * 1e6)
+            str order_id = str(f"buy-{trading_pair}-{tracking_nonce}")
 
-    cdef str c_sell(self, str trading_pair, object amount, object order_type=OrderType.MARKET, object price=s_decimal_NaN,
+        safe_ensure_future(self.execute_buy(order_id, trading_pair, amount, order_type, price))
+        return order_id
+
+    cdef str c_sell(self,
+                    str trading_pair,
+                    object amount,
+                    object order_type=OrderType.MARKET,
+                    object price=s_decimal_0,
                     dict kwargs={}):
-        return ''
+        cdef:
+            int64_t tracking_nonce = <int64_t > (time.time() * 1e6)
+            str order_id = str(f"sell-{trading_pair}-{tracking_nonce}")
 
-    cdef c_cancel(self, str trading_pair, str order_id):
-        return ''
+        safe_ensure_future(self.execute_sell(order_id, trading_pair, amount, order_type, price))
+        return order_id
+
+    async def execute_buy(self,
+                          order_id: str,
+                          trading_pair: str,
+                          amount: Decimal,
+                          order_type: OrderType,
+                          price: Decimal) -> str:
+        try:
+            order_result = None
+            self.c_start_tracking_order(client_order_id = order_id,
+                                        exchange_order_id = None,
+                                        trading_pair = trading_pair,
+                                        order_type = order_type,
+                                        trade_type = TradeType.BUY,
+                                        price = price,
+                                        amount = amount)
+
+            if order_type is OrderType.LIMIT:
+                self.logger().info(f"Placing Limit Order: amount={amount} price={price}")
+                order_result = await self.place_order(order_id = order_id,
+                                                      trading_pair = trading_pair,
+                                                      amount = amount,
+                                                      price = price,
+                                                      is_buy = True)
+            elif order_type is OrderType.MARKET:
+                price = self.c_get_price(trading_pair, True)
+                shifted_price = price * Decimal(10.0 ** 18)
+                self.logger().info(f"Placing Market Order: amount={amount} price={price}")
+                order_result = await self.place_order(order_id = order_id,
+                                                      trading_pair = trading_pair,
+                                                      amount = amount,
+                                                      price = price,
+                                                      is_buy = True)
+            else:
+                raise ValueError(f"Invalid OrderType {order_type}. Aborting.")
+
+            exchange_order_id = order_result["id"]
+            tracked_order = self._in_flight_orders.get(order_id)
+            if tracked_order is not None and exchange_order_id:
+                tracked_order.update_exchange_order_id(exchange_order_id)
+                tracked_order.swap = order_result
+                self.c_trigger_event(self.MARKET_BUY_ORDER_CREATED_EVENT_TAG,
+                                     BuyOrderCreatedEvent(
+                                         self._current_timestamp,
+                                         order_type,
+                                         trading_pair,
+                                         amount,
+                                         price,
+                                         order_id
+                                     ))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.c_stop_tracking_order(order_id)
+            self.logger().network(
+                f"Error submitting buy order to TEX for {amount} {trading_pair}.",
+                exc_info=True,
+                app_warning_msg=f"Failed to submit buy order to TEX: {e}"
+            )
+            self.c_trigger_event(self.MARKET_ORDER_FAILURE_EVENT_TAG,
+                                 MarketOrderFailureEvent(self._current_timestamp,
+                                                         order_id,
+                                                         order_type)
+                                 )
+
+    async def execute_sell(self,
+                           order_id: str,
+                           trading_pair: str,
+                           amount: Decimal,
+                           order_type: OrderType,
+                           price: Decimal) -> str:
+
+        try:
+            order_result = None
+            self.c_start_tracking_order(client_order_id = order_id,
+                                        exchange_order_id = None,
+                                        trading_pair = trading_pair,
+                                        order_type = order_type,
+                                        trade_type = TradeType.BUY,
+                                        price = price,
+                                        amount = amount)
+
+            if order_type is OrderType.LIMIT:
+                self.logger().info(f"Placing Limit Order: amount={amount} price={price}")
+                order_result = await self.place_order(order_id = order_id,
+                                                      trading_pair = trading_pair,
+                                                      amount = amount,
+                                                      price = price,
+                                                      is_buy = False)
+            elif order_type is OrderType.MARKET:
+                price = self.c_get_price(trading_pair, True)
+                shifted_price = price * Decimal(10.0 ** 18)
+                self.logger().info(f"Placing Market Order: amount={amount} price={price}")
+                order_result = await self.place_order(order_id = order_id,
+                                                      trading_pair = trading_pair,
+                                                      amount = amount,
+                                                      price = price,
+                                                      is_buy = False)
+            else:
+                raise ValueError(f"Invalid OrderType {order_type}. Aborting.")
+
+            exchange_order_id = order_result["id"]
+            tracked_order = self._in_flight_orders.get(order_id)
+            if tracked_order is not None and exchange_order_id:
+                tracked_order.update_exchange_order_id(exchange_order_id)
+                tracked_order.swap = order_result
+                self.c_trigger_event(self.MARKET_SELL_ORDER_CREATED_EVENT_TAG,
+                                     SellOrderCreatedEvent(
+                                         self._current_timestamp,
+                                         order_type,
+                                         trading_pair,
+                                         amount,
+                                         price,
+                                         order_id
+                                     ))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            self.c_stop_tracking_order(order_id)
+            self.logger().network(
+                f"Error submitting sell order to TEX for {amount} {trading_pair}.",
+                exc_info=True,
+                app_warning_msg=f"Failed to submit buy order to TEX: {e}"
+            )
+            self.c_trigger_event(self.MARKET_ORDER_FAILURE_EVENT_TAG,
+                                 MarketOrderFailureEvent(self._current_timestamp,
+                                                         order_id,
+                                                         order_type)
+                                 )
+
+    cdef c_cancel(self, str trading_pair, str client_order_id):
+        # If there's an ongoing cancel on this order within the expiry time, don't do it again.
+        if self._in_flight_cancels.get(client_order_id, 0) > self._current_timestamp - self.CANCEL_EXPIRY_TIME:
+            return
+
+        # Maintain the in flight orders list vs. expiry invariant.
+        cdef:
+            list keys_to_delete = []
+
+        for k, cancel_timestamp in self._in_flight_cancels.items():
+            if cancel_timestamp < self._current_timestamp - self.CANCEL_EXPIRY_TIME:
+                keys_to_delete.append(k)
+            else:
+                break
+        for k in keys_to_delete:
+            del self._in_flight_cancels[k]
+
+        # Record the in-flight cancellation.
+        self._in_flight_cancels[client_order_id] = self._current_timestamp
+
+        # Execute the cancel asynchronously.
+        safe_ensure_future(self.cancel_order(client_order_id))
 
     async def cancel_all(self, timeout_seconds: float) -> List[CancellationResult]:
-        return ''
+        incomplete_orders = [o for o in self.in_flight_orders.values() if not o.is_done]
+        client_order_ids = [o.client_order_id for o in incomplete_orders]
+        order_id_set = set(client_order_ids)
+        tasks = [self.cancel_order(i) for i in client_order_ids]
+        successful_cancellations = []
 
-    async def execute_buy(self, trading_pair: str, amount: Decimal, price: Decimal, order_type: OrderType) -> str:
-        return ''
+        try:
+            async with timeout(timeout_seconds):
+                cancellation_results = await safe_gather(*tasks, return_exceptions=True)
+                for cid, cr in zip(client_order_ids, cancellation_results):
+                    if isinstance(cr, Exception):
+                        continue
+                    if isinstance(cr, dict) and cr.get("success") == 1:
+                        order_id_set.remove(cid)
+                        successful_cancellations.append(CancellationResult(cid, True))
+        except Exception as e:
+            self.logger().network(
+                f"Unexpected error cancelling orders.",
+                exc_info=True,
+                app_warning_msg=f"Failed to cancel orders on IDEX. Check Ethereum wallet and network connection."
+            )
 
-    async def execute_sell(self, trading_pair: str, amount: Decimal, price: Decimal, order_type: OrderType) -> str:
-        return ''
+        failed_cancellations = [CancellationResult(oid, False) for oid in order_id_set]
+        return successful_cancellations + failed_cancellations
 
     cdef c_start_tracking_order(self,
                                 str client_order_id,
+                                str exchange_order_id,
                                 str trading_pair,
                                 object trade_type,
                                 object order_type,
@@ -833,10 +1072,14 @@ cdef class TEXMarket(MarketBase):
                                 object price):
         self._in_flight_orders[client_order_id] = TEXInFlightOrder(
             client_order_id=client_order_id,
-            exchange_order_id=None,
+            exchange_order_id=exchange_order_id,
             trading_pair=trading_pair,
             order_type=order_type,
             trade_type=trade_type,
             price=price,
             amount=amount
         )
+
+    cdef c_stop_tracking_order(self, str order_id):
+        if order_id in self._in_flight_orders:
+            del self._in_flight_orders[order_id]

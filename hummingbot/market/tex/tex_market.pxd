@@ -14,6 +14,7 @@ cdef class TEXMarket(MarketBase):
         double _last_pull_timestamp
         dict _in_flight_deposits
         dict _in_flight_orders
+        object _in_flight_cancels
         dict _order_not_found_records
         TransactionTracker _tx_tracker
         dict _withdraw_rules
@@ -37,3 +38,14 @@ cdef class TEXMarket(MarketBase):
         object _sub_wallets_status
         list _eth_sub_wallets
         list _trading_pairs
+
+    cdef c_start_tracking_order(self,
+                                str client_order_id,
+                                str exchange_order_id,
+                                str trading_pair,
+                                object trade_type,
+                                object order_type,
+                                object amount,
+                                object price)
+
+    cdef c_stop_tracking_order(self, str order_id)
