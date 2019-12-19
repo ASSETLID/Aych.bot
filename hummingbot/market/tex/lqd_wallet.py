@@ -89,18 +89,20 @@ class LQDWallet():
     def spent_and_gained(self, eon: LQDEon = None) -> Dict[str, float]:
         if eon is None:
             eon = self.current_eon
-        self.logger().info(f"**TRANSFERS => {eon.transfers}")
-        transfers = [transfer for transfer in eon.transfers if not transfer['passive'] or not is_same_hex(transfer['recipient']['address'], self.wallet_address)]
+        transfers = [transfer for transfer in eon.transfers if not transfer['voided']
+                     and not (transfer['passive']
+                              and is_same_hex(transfer['recipient']['address'], self.wallet_address))]
         if len(transfers) == 0:
             return {'spent': 0, 'gained': 0}
 
         last_transfer = transfers[len(transfers) - 1]
-        is_outgoing = is_same_hex(last_transfer['wallet']['address'], self.wallet_address) and \
-            is_same_hex(last_transfer['wallet']['token'], self.token_address)
+        self.logger().info(f"LAST TRANSFER => {last_transfer}")
+        is_outgoing = is_same_hex(last_transfer['wallet']['address'], self.wallet_address) and is_same_hex(last_transfer['wallet']['token'], self.token_address)
         is_swap = last_transfer['amount_swapped']
-        self.logger().info(f"SPENT_GAINED => {last_transfer}")
-        if is_swap and last_transfer[ActiveStateType.RECIPIENT_FINALIZATION] is None and \
-                not last_transfer['cancelled'] and not last_transfer['voided'] and last_transfer['appended']:
+        if is_swap and last_transfer[ActiveStateType.RECIPIENT_FINALIZATION] is None \
+                and not last_transfer['cancelled'] \
+                and not last_transfer['voided'] \
+                and last_transfer['appended']:
             current_matched_out, current_matched_in = self.get_current_eon_matched_amounts(last_transfer)
             if is_outgoing:
                 spent = int(last_transfer[ActiveStateType.SENDER]['updated_spendings'])
@@ -236,12 +238,14 @@ class LQDWallet():
 
     def calculate_tx_set_hash(self, transfers) -> str:
         # filter out incoming passive transfers
-        transfers = [transfer for transfer in transfers if not transfer['passive'] or not is_same_hex(transfer['recipient']['address'], self.wallet_address)]
-        self.logger().info(f"Transfers => {transfers}")
+        transfers = [transfer for transfer in transfers if not transfer['voided']
+                     and not (transfer['passive']
+                              and is_same_hex(transfer['recipient']['address'], self.wallet_address))]
         if len(transfers) > 0:
             padding_length = next_power_of_2(len(transfers)) - len(transfers)
-            transfers += [{'is_padding': True}] * padding_length
+            transfers += [{'id': 0, 'is_padding': True}] * padding_length
 
+        self.logger().info(f"Calculating Hash of list => {[transfer['id'] for transfer in transfers]}")
         return self.construct_merkle_tree(transfers)['hash']
 
     def construct_merkle_tree(self, transfers):

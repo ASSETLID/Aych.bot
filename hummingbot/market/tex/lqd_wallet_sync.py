@@ -61,8 +61,7 @@ class LQDWalletSync():
                     async for msg in self.state_notifications_stream():
                         self.ws_stream_router(msg)
             except asyncio.CancelledError:
-                self.logger().error('Cancelled exception raised')
-                raise
+                self.logger().error('Cancelled Web socket')
             except Exception as e:
                 self.logger().error(f"Error occurred while dealing with ws: {e.__class__}: {e}")
                 await asyncio.sleep(20.0)

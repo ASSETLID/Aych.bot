@@ -24,7 +24,7 @@ cdef class TEXInFlightOrder(InFlightOrderBase):
                  price: Decimal,
                  amount: Decimal,
                  swap = None,
-                 initial_state: str = "NEW"):
+                 initial_state: str = "open"):
         super().__init__(
             TEXMarket,
             client_order_id,
@@ -37,6 +37,7 @@ cdef class TEXInFlightOrder(InFlightOrderBase):
             initial_state
         )
         self.trade_id_set = set()
+        self.available_amount_base = amount
         self._swap = swap
 
     def __repr__(self) -> str:
@@ -59,11 +60,11 @@ cdef class TEXInFlightOrder(InFlightOrderBase):
 
     @property
     def is_done(self) -> bool:
-        return self.available_amount_base == self.pending_amount_base == s_decimal_0
+        return self.available_amount_base == s_decimal_0 or self.last_state in ["complete", "cancelled"]
 
     @property
     def is_cancelled(self) -> bool:
-        return self.last_state in {"canceled"}
+        return self.last_state in {"cancelled"}
 
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -99,15 +100,5 @@ cdef class TEXInFlightOrder(InFlightOrderBase):
         retval.last_state = data["last_state"]
         return retval
 
-    def update_with_trade_update(self, trade_update: Dict[str, Any]):
-        # TODO: Implement this
-        trade_id = trade_update["transactionId"]
-        if (trade_update["makerOrderId"] != self.exchange_order_id and
-                trade_update["takerOrderId"] != self.exchange_order_id) or trade_id in self.trade_id_set:
-            # trade already recorded
-            return
-        self.trade_id_set.add(trade_id)
-        self.executed_amount_base += Decimal(trade_update["amount"])
-        self.available_amount_base -= Decimal(trade_update["amount"])
-        self.executed_amount_quote += Decimal(trade_update["amount"]) * Decimal(trade_update["price"])
-        return trade_update
+    def set_swap(self, swap):
+        self._swap = swap

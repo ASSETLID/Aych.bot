@@ -38,12 +38,23 @@ async def get_registration_data(wallet_address: str, token_address: str):
             return data
 
 
+async def get_transfer(transfer_id: str):
+    async with aiohttp.ClientSession() as client:
+        async with client.get(f"{OPERATOR_URL}/audit/transfers/{transfer_id}") as response:
+            response: aiohttp.ClientResponse = response
+            if response.status != 200:
+                raise IOError(f"Error while fetching wallet data, status: {response.status}")
+            data: Dict[str, any] = await response.json()
+            return data
+
+
 async def post_transfer(wallet_address: str,
                         token_address: str,
                         active_state_signature: str,
                         balance_marker_signature: str,
                         wallet_balance: str,
-                        transfer):
+                        transfer,
+                        logger):
     data = {
         "wallet": {
             "address": remove_0x_prefix(wallet_address),
@@ -62,9 +73,10 @@ async def post_transfer(wallet_address: str,
         headers = {'content-type': 'application/json'}
         async with client.post(f"{OPERATOR_URL}/transfer/", data = ujson.dumps(data), headers = headers) as response:
             response: aiohttp.ClientResponse = response
+            data: Dict[str, any] = await response.json()
+            logger().info(f"RESPONSE => {data}")
             if response.status != 201:
                 raise IOError(f"Error sending transfer: {response.status}")
-            data: Dict[str, any] = await response.json()
             return data
 
 

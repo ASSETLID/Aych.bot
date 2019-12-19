@@ -73,3 +73,12 @@ def swap_freeze_hash(debit_token: str, credit_token: str, nonce: int):
     credit_token_hash = Web3.soliditySha3(['address'], [credit_token])
 
     return Web3.soliditySha3(['bytes32', 'bytes32', 'uint256'], [debit_token_hash, credit_token_hash, nonce])
+
+
+def extract_exchange_id(exchange_order_id: str, id_type: str):
+    if len(exchange_order_id.split('/')) < 2:
+        raise Exception(f"Invalid exchange order id format: {exchange_order_id}")
+    if id_type not in ['id', 'tx_id']:
+        raise Exception(f"Invalid id type: {id_type}")
+
+    return exchange_order_id.split('/')[0] if id_type == 'id' else exchange_order_id.split('/')[1]

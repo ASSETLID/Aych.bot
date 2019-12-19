@@ -54,14 +54,16 @@ from hummingbot.market.tex.tex_operator_api import (get_current_eon,
                                                     post_transfer, post_swap,
                                                     post_swap_freezing,
                                                     post_swap_cancellation,
-                                                    post_swap_finalization)
+                                                    post_swap_finalization,
+                                                    get_transfer)
 from hummingbot.market.tex.tex_order_book_tracker import TEXOrderBookTracker
 from hummingbot.market.tex.tex_in_flight_order import TEXInFlightOrder
 from hummingbot.market.tex.tex_utils import (sign_data,
                                              generate_seed,
                                              hash_balance_marker,
                                              remove_0x_prefix,
-                                             swap_freeze_hash)
+                                             swap_freeze_hash,
+                                             extract_exchange_id)
 from hummingbot.market.tex.tex_crypto import HDPrivateKey, HDKey
 from hummingbot.core.network_iterator import NetworkStatus
 from hummingbot.core.data_type.order_book_tracker import OrderBookTrackerDataSourceType
@@ -74,6 +76,8 @@ from eth_utils import (to_checksum_address)
 from copy import (copy, deepcopy)
 import random
 from web3 import Web3
+from threading import Lock
+lock = Lock()
 s_logger = None
 
 s_decimal_0 = Decimal(0)
@@ -158,6 +162,7 @@ cdef class TEXMarket(MarketBase):
         return {
             "account_balance": len(self._account_balances) > 0 if self._trading_required else True,
             "order_books_initialized": self._order_book_tracker.ready,
+            "start": True,
         }
 
     @property
@@ -191,10 +196,21 @@ cdef class TEXMarket(MarketBase):
         ]
 
     def restore_tracking_states(self, saved_states: Dict[str, any]):
+        self.logger().info(f"Restoring tracking states><><><><><><>")
         self._in_flight_orders.update({
             key: TEXInFlightOrder.from_json(value)
             for key, value in saved_states.items()
         })
+
+    async def _restore_tracked_swaps(self):
+        for order in list(self._in_flight_orders.values()):
+            try:
+                swap_id = extract_exchange_id(order.exchange_order_id, 'id')
+                swap = await get_transfer(swap_id)
+                order.set_swap(swap)
+            except Exception as e:
+                self.logger().error(f'Error occurred while trying to fetch swap, {e.__class__}: {e}')
+                raise e
 
     async def get_active_exchange_markets(self) -> pd.DataFrame:
         return await TEXAPIOrderBookDataSource.get_active_exchange_markets()
@@ -214,6 +230,7 @@ cdef class TEXMarket(MarketBase):
                 await self._poll_notifier.wait()
                 await self._update_balances()
                 await self._sync_sub_wallets()
+                await self._update_order_status()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -231,6 +248,93 @@ cdef class TEXMarket(MarketBase):
             self._account_available_balances = available_balances
             self._account_balances = total_balances
             self._last_update_balances_timestamp = current_timestamp
+
+    async def _update_order_status(self):
+        tracked_orders = list(self._in_flight_orders.values())
+        updated_swaps = []
+        self.logger().info(f"Tracked Orders => {tracked_orders}")
+        for tracked_order in tracked_orders:
+            exchange_id = tracked_order.exchange_order_id
+            swap_id = extract_exchange_id(exchange_id, 'tx_id')
+            self.logger().info(f"Tracked Order Swap => {tracked_order.swap}")
+            wallet_address = tracked_order.swap['wallet']['address']
+            token_address = tracked_order.swap['wallet']['token']
+            wallet = self._wallet_map[f"{token_address}/{wallet_address}"]
+            updated_swap_filter = [swap for swap in wallet.current_eon.transfers if swap['tx_id'] == swap_id]
+            if len(updated_swap_filter) == 0:
+                self.c_stop_tracking_order(tracked_order.client_order_id)
+                raise Exception(f"Couldn't find swap with id {exchange_id}")
+            updated_swaps.append(updated_swap_filter[0])
+
+        for swap, tracked_order in zip(updated_swaps, tracked_orders):
+            previous_is_done = tracked_order.is_done
+            previous_is_cancelled = tracked_order.is_cancelled
+            filled_amount_bn = swap['matched_amounts']['in'] if tracked_order.trade_type is TradeType.BUY else swap['matched_amounts']['out']
+            filled_amount = filled_amount_bn / (10 ** 18)
+            amount_bn = swap['amount_swapped'] if tracked_order.trade_type is TradeType.BUY else swap['amount']
+            amount = amount_bn / (10 ** 18)
+            remaining_amount = amount - filled_amount
+            order_executed_amount = Decimal(tracked_order.available_amount_base - remaining_amount)
+            tracked_order.last_state = 'complete' if swap['complete'] else 'cancelled' if swap['cancelled'] else 'open'
+            tracked_order.executed_amount_base = Decimal(filled_amount)
+            tracked_order.available_amount_base = Decimal(remaining_amount)
+            tracked_order.executed_amount_quote = tracked_order.executed_amount_base * tracked_order.price
+            tracked_order.set_swap(swap)
+
+            if order_executed_amount > s_decimal_0:
+                self.logger().info(f"Filled {order_executed_amount} out of {tracked_order.amount} of the "
+                                   f"limit order {exchange_id}.")
+                self.c_trigger_event(
+                    self.MARKET_ORDER_FILLED_EVENT_TAG,
+                    OrderFilledEvent(
+                        timestamp = self._current_timestamp,
+                        order_id = tracked_order.client_order_id,
+                        trading_pair = tracked_order.trading_pair,
+                        trade_type = tracked_order.trade_type,
+                        order_type = OrderType.LIMIT,
+                        price = tracked_order.price,
+                        amount = order_executed_amount,
+                        trade_fee = TradeFee(percent=Decimal("0.00")),
+                        exchange_trade_id=exchange_id,
+                    )
+                )
+
+            if not previous_is_cancelled and tracked_order.is_cancelled:
+                self.logger().info(f"The limit order {exchange_id} has cancelled according "
+                                   f"to order status API.")
+                self.c_trigger_event(
+                    self.MARKET_ORDER_CANCELLED_EVENT_TAG,
+                    OrderCancelledEvent(self._current_timestamp, tracked_order.client_order_id)
+                )
+                self.c_stop_tracking_order(tracked_order.client_order_id)
+            elif not previous_is_done and tracked_order.is_done:
+                if tracked_order.trade_type is TradeType.BUY:
+                    self.logger().info(f"The limit buy order {tracked_order.client_order_id}"
+                                       f"has completed according to order status API.")
+                    self.c_trigger_event(self.MARKET_BUY_ORDER_COMPLETED_EVENT_TAG,
+                                         BuyOrderCompletedEvent(self._current_timestamp,
+                                                                tracked_order.client_order_id,
+                                                                tracked_order.base_asset,
+                                                                tracked_order.quote_asset,
+                                                                tracked_order.quote_asset,
+                                                                tracked_order.executed_amount_base,
+                                                                tracked_order.executed_amount_quote,
+                                                                TradeFee(percent=Decimal("0.00")),
+                                                                OrderType.LIMIT))
+                else:
+                    self.logger().info(f"The limit sell order {tracked_order.client_order_id}"
+                                       f"has completed according to order status API.")
+                    self.c_trigger_event(self.MARKET_SELL_ORDER_COMPLETED_EVENT_TAG,
+                                         SellOrderCompletedEvent(self._current_timestamp,
+                                                                 tracked_order.client_order_id,
+                                                                 tracked_order.base_asset,
+                                                                 tracked_order.quote_asset,
+                                                                 tracked_order.quote_asset,
+                                                                 tracked_order.executed_amount_base,
+                                                                 tracked_order.executed_amount_quote,
+                                                                 TradeFee(percent=Decimal("0.00")),
+                                                                 OrderType.LIMIT))
+                self.c_stop_tracking_order(tracked_order.client_order_id)
 
     async def _create_wallet(self, wallet_address: str, private_key: str, token_address: str, eon_number: int) -> LQDWallet:
         wallet_data = await get_wallet_data(wallet_address = wallet_address, token_address = token_address, eon_number = eon_number)
@@ -339,14 +443,21 @@ cdef class TEXMarket(MarketBase):
 
         for swap in non_finalized_swaps:
             self.logger().info(f"Finalizing => Swap: {swap}")
-            await self._finalize_swap(swap)
-
+            try:
+                await self._finalize_swap(swap)
+            except Exception as e:
+                self.logger().error(f'Error occurred while trying to finalize, {e.__class__}: {e}')
+                raise e
         if not is_used:
-            await self._harvest_sub_wallet(sub_wallet)
-
+            try:
+                await self._harvest_sub_wallet(sub_wallet)
+            except Exception as e:
+                self.logger().error(f'Error occurred while trying to harvest, {e.__class__}: {e}')
+                raise e
         return is_used
 
     async def _sync_sub_wallets(self, first_sync: bool = False):
+        lock.acquire()
         markets = await self.get_active_exchange_markets()
         # TODO: Handle multiple pairs in future(Currently handling only one token pair)
         trading_pair = self._trading_pairs[0]
@@ -355,7 +466,9 @@ cdef class TEXMarket(MarketBase):
 
         if first_sync:
             self._sub_wallets_status["blocked"] = [index for index in range(SUB_WALLET_COUNT)]
-        for index in self._sub_wallets_status["blocked"]:
+
+        blocked_list = deepcopy(self._sub_wallets_status["blocked"])
+        for index in blocked_list:
             eth_sub_wallet = self._eth_sub_wallets[index]
             is_account_free = True
             for token in tokens:
@@ -371,6 +484,7 @@ cdef class TEXMarket(MarketBase):
         # Sort swap wallets
         self._sub_wallets_status["available"].sort()
         self._sub_wallets_status["blocked"].sort()
+        lock.release()
         self.logger().info(f"Sub Wallets Status: {self._sub_wallets_status}")
 
     async def _send_transfer(self,
@@ -417,70 +531,80 @@ cdef class TEXMarket(MarketBase):
                                            active_state_signature = active_state_signature.hex(),
                                            balance_marker_signature = balance_marker_signature.hex(),
                                            wallet_balance = str(sender_balance - int(amount)),
-                                           transfer = new_transfer)
+                                           transfer = new_transfer,
+                                           logger = self.logger)
             # Append transfer to wallet
             transfer['recipient'] = {'address': transfer['recipient'], 'token': transfer['wallet']['token']}
             transfer['amount_swapped'] = None
             transfer['cancelled'] = False
             transfer['voided'] = False
+            transfer['recipient_finalization_active_state'] = None
             sender_wallet.current_eon.transfers.append(transfer)
             return transfer
         except Exception as e:
-            self.logging().error(f'Error occurred while trying to transfer, {e.__class__}: {e}')
+            self.logger().error(f'Error occurred while trying to transfer, {e.__class__}: {e}')
             raise e
 
     async def _send_swap(self, credit_token: str, debit_token: str, credit_amount: int, debit_amount: int):
+        await self._sync_sub_wallets()
         if len(self._sub_wallets_status["available"]) == 0:
             raise Exception('Swap limit reached!')
 
-        swap_wallet_index = self._sub_wallets_status["available"].pop(0)
-
-        # Get Swap Sub Wallets
-        swap_eth_wallet = self._eth_sub_wallets[swap_wallet_index]
-        self.logger().info(f"**Swap eth wallet => {swap_eth_wallet}")
-        credit_wallet = self._wallet_map[f"{credit_token}/{swap_eth_wallet['address']}"]
-        debit_wallet = self._wallet_map[f"{debit_token}/{swap_eth_wallet['address']}"]
-        # Calculate Fund
-        fund_amount = debit_amount - debit_wallet.balance()
-        self.logger().info(f"**Fund Amount => {fund_amount}")
-        # Make sure debit wallet has balance exactly equal to debit amount
-        if fund_amount > 0:
-            await self._send_transfer(self.wallet.address, swap_eth_wallet['address'], fund_amount, debit_token)
-        elif fund_amount < 0:
-            await self._send_transfer(swap_eth_wallet['address'], self.wallet.address, abs(fund_amount), debit_token)
-
-        nonce = random.randint(1, 999999)
-        hashes = self._swap_creation_hashes(credit_amount, debit_amount, credit_wallet, debit_wallet, nonce)
-        credit_signatures = list(map(lambda c_hash: remove_0x_prefix(sign_data(c_hash.hex(), debit_wallet.private_key).hex()), hashes['credit_active_states']))
-        debit_signatures = list(map(lambda d_hash: remove_0x_prefix(sign_data(d_hash.hex(), debit_wallet.private_key).hex()), hashes['debit_active_states']))
-        fulfillment_signatures = list(map(lambda f_hash: remove_0x_prefix(sign_data(f_hash.hex(), debit_wallet.private_key).hex()), hashes['fulfillment_active_states']))
-        credit_balance_signatures = list(map(lambda c_b_hash: remove_0x_prefix(sign_data(c_b_hash.hex(), debit_wallet.private_key).hex()), hashes['credit_balance_markers']))
-        debit_balance_signatures = list(map(lambda d_b_hash: remove_0x_prefix(sign_data(d_b_hash.hex(), debit_wallet.private_key).hex()), hashes['debit_balance_markers']))
-
         try:
-            swap = await post_swap(credit_wallet = credit_wallet,
-                                   debit_wallet = debit_wallet,
-                                   credit_amount = str(credit_amount),
-                                   debit_amount = str(debit_amount),
-                                   credit_signatures = credit_signatures,
-                                   debit_signatures = debit_signatures,
-                                   credit_balance_signatures = credit_balance_signatures,
-                                   debit_balance_signatures = debit_balance_signatures,
-                                   fulfillment_signatures = fulfillment_signatures,
-                                   eon_number = credit_wallet.current_eon.eon_number,
-                                   nonce = str(nonce),
-                                   logger = self.logger)
+            swap_wallet_index = self._sub_wallets_status["available"].pop(0)
 
-            self._sub_wallets_status["blocked"].append(swap_wallet_index)
-            # Append swap to credit/debit transfers
-            swap['matched_amounts'] = {'in': 0, 'out': 0}
-            swap['cancelled'] = False
-            swap['voided'] = False
-            credit_wallet.current_eon.transfers.append(swap)
-            debit_wallet.current_eon.transfers.append(swap)
-            return swap
+            # Get Swap Sub Wallets
+            swap_eth_wallet = self._eth_sub_wallets[swap_wallet_index]
+            self.logger().info(f"**Swap eth wallet => {swap_eth_wallet}")
+            credit_wallet = self._wallet_map[f"{credit_token}/{swap_eth_wallet['address']}"]
+            debit_wallet = self._wallet_map[f"{debit_token}/{swap_eth_wallet['address']}"]
+            # Calculate Fund
+            fund_amount = debit_amount - debit_wallet.balance()
+            self.logger().info(f"**Fund Amount => {fund_amount}")
+            # Make sure debit wallet has balance exactly equal to debit amount
+            if fund_amount > 0:
+                await self._send_transfer(self.wallet.address, swap_eth_wallet['address'], fund_amount, debit_token)
+            elif fund_amount < 0:
+                await self._send_transfer(swap_eth_wallet['address'], self.wallet.address, abs(fund_amount), debit_token)
+
+            nonce = random.randint(1, 999999)
+            hashes = self._swap_creation_hashes(credit_amount, debit_amount, credit_wallet, debit_wallet, nonce)
+            credit_signatures = list(map(lambda c_hash: remove_0x_prefix(sign_data(c_hash.hex(), debit_wallet.private_key).hex()), hashes['credit_active_states']))
+            debit_signatures = list(map(lambda d_hash: remove_0x_prefix(sign_data(d_hash.hex(), debit_wallet.private_key).hex()), hashes['debit_active_states']))
+            fulfillment_signatures = list(map(lambda f_hash: remove_0x_prefix(sign_data(f_hash.hex(), debit_wallet.private_key).hex()), hashes['fulfillment_active_states']))
+            credit_balance_signatures = list(map(lambda c_b_hash: remove_0x_prefix(sign_data(c_b_hash.hex(), debit_wallet.private_key).hex()), hashes['credit_balance_markers']))
+            debit_balance_signatures = list(map(lambda d_b_hash: remove_0x_prefix(sign_data(d_b_hash.hex(), debit_wallet.private_key).hex()), hashes['debit_balance_markers']))
+
+            try:
+                swap = await post_swap(credit_wallet = credit_wallet,
+                                       debit_wallet = debit_wallet,
+                                       credit_amount = str(credit_amount),
+                                       debit_amount = str(debit_amount),
+                                       credit_signatures = credit_signatures,
+                                       debit_signatures = debit_signatures,
+                                       credit_balance_signatures = credit_balance_signatures,
+                                       debit_balance_signatures = debit_balance_signatures,
+                                       fulfillment_signatures = fulfillment_signatures,
+                                       eon_number = credit_wallet.current_eon.eon_number,
+                                       nonce = str(nonce),
+                                       logger = self.logger)
+
+                self._sub_wallets_status["blocked"].append(swap_wallet_index)
+                # Append swap to credit/debit transfers
+                swap['matched_amounts'] = {'in': 0, 'out': 0}
+                swap['cancelled'] = False
+                swap['voided'] = False
+                swap['passive'] = False
+                swap['recipient_finalization_active_state'] = None
+                credit_wallet.current_eon.transfers.append(swap)
+                debit_wallet.current_eon.transfers.append(swap)
+                return swap
+            except Exception as e:
+                self.logger().error(f'Error occurred while trying to swap, {e.__class__}: {e}')
+                raise e
+
         except Exception as e:
-            self.logging().error(f'Error occurred while trying to swap, {e.__class__}: {e}')
+            self.logger().error(f'Swap Process Failed, {e.__class__}: {e}')
             self._sub_wallets_status["available"].append(swap_wallet_index)
             raise e
 
@@ -620,9 +744,15 @@ cdef class TEXMarket(MarketBase):
 
         freeze_hash = swap_freeze_hash(debit_token, credit_token, int(swap['nonce']))
         freeze_signature = sign_data(freeze_hash.hex(), debit_wallet.private_key).hex()
-        self.logger().info(f"Posting freeze signatures")
-        # await post_swap_freezing(freeze_signature, swap['id'], self.logger)
-        self.logger().info(f"Swap Frozen")
+
+        try:
+            self.logger().info(f"Posting freeze signatures")
+            await post_swap_freezing(freeze_signature, swap['id'], self.logger)
+        except Exception as e:
+            self.logger().error(f'Error occurred while trying to freeze swap, {e.__class__}: {e}')
+            raise e
+
+        self.logger().info(f"Swap Frozen Successfully")
         hashes = self._swap_cancellation_hashes(swap)
         debit_cancellation_signatures = [sign_data(state_hash.hex(), debit_wallet.private_key).hex() for state_hash in hashes['debit_cancellation_hashes']]
         credit_cancellation_signatures = [sign_data(state_hash.hex(), debit_wallet.private_key).hex() for state_hash in hashes['credit_cancellation_hashes']]
@@ -632,7 +762,7 @@ cdef class TEXMarket(MarketBase):
                                          swap['id'],
                                          self.logger)
         except Exception as e:
-            self.logging().error(f'Error occurred while trying to cancel swap, {e.__class__}: {e}')
+            self.logger().error(f'Error occurred while trying to cancel swap, {e.__class__}: {e}')
             raise e
 
     def _swap_cancellation_hashes(self, swap):
@@ -710,7 +840,7 @@ cdef class TEXMarket(MarketBase):
                                          swap['id'],
                                          self.logger)
         except Exception as e:
-            self.logging().error(f'Error occurred while trying to finalize swap, {e.__class__}: {e}')
+            self.logger().error(f'Error occurred while trying to finalize swap, {e.__class__}: {e}')
             raise e
 
     def _swap_finalization_hashes(self, swap):
@@ -751,20 +881,22 @@ cdef class TEXMarket(MarketBase):
     async def _harvest_sub_wallet(self, sub_wallet: LQDWallet):
         balance = sub_wallet.balance()
         if balance > 0:
-            self.logger().info("Harvesting...")
+            self.logger().info(f"Harvesting an amount of {balance}")
+            self.logger().info(f"sender_address = {sub_wallet.wallet_address} \n recipient_address = self.wallet.address \n amount = {balance} \n token_address = {sub_wallet.token_address}")
             await self._send_transfer(sender_address = sub_wallet.wallet_address,
                                       recipient_address = self.wallet.address,
                                       amount = balance,
                                       token_address = sub_wallet.token_address)
 
     async def start_network(self):
-        print('starting network')
+        self.logger().info('STARTING NETWORK')
         if self._order_tracker_task is not None:
             self._stop_network()
         self._generate_sub_wallets()
         self._lqd_wallet_sync_task = safe_ensure_future(self._lqd_wallet_sync.start())
         await self._init_LQD_wallets()
         await self._update_balances()
+        await self._restore_tracked_swaps()
         await self._sync_sub_wallets(first_sync = True)
         # await self._send_transfer(self.wallet.address, '0xDE9Aa519E2Ee3135D008920e6a85dda5EB91C9A1', 0.001, CONTRACT_ADDRESS)
         # await self._send_swap("0x66b26B6CeA8557D6d209B33A30D69C11B0993a3a", "0xA9F86DD014C001Acd72d5b25831f94FaCfb48717", 20000000000000, 1000000000000000)
@@ -929,11 +1061,11 @@ cdef class TEXMarket(MarketBase):
             else:
                 raise ValueError(f"Invalid OrderType {order_type}. Aborting.")
 
-            exchange_order_id = order_result["id"]
+            exchange_order_id = f"{order_result['id']}/{order_result['tx_id']}"
             tracked_order = self._in_flight_orders.get(order_id)
             if tracked_order is not None and exchange_order_id:
-                tracked_order.update_exchange_order_id(exchange_order_id)
-                tracked_order.swap = order_result
+                tracked_order.update_exchange_order_id(str(exchange_order_id))
+                tracked_order.set_swap(order_result)
                 self.c_trigger_event(self.MARKET_BUY_ORDER_CREATED_EVENT_TAG,
                                      BuyOrderCreatedEvent(
                                          self._current_timestamp,
@@ -994,11 +1126,11 @@ cdef class TEXMarket(MarketBase):
             else:
                 raise ValueError(f"Invalid OrderType {order_type}. Aborting.")
 
-            exchange_order_id = order_result["id"]
+            exchange_order_id = f"{order_result['id']}/{order_result['tx_id']}"
             tracked_order = self._in_flight_orders.get(order_id)
             if tracked_order is not None and exchange_order_id:
-                tracked_order.update_exchange_order_id(exchange_order_id)
-                tracked_order.swap = order_result
+                tracked_order.update_exchange_order_id(str(exchange_order_id))
+                tracked_order.set_swap(order_result)
                 self.c_trigger_event(self.MARKET_SELL_ORDER_CREATED_EVENT_TAG,
                                      SellOrderCreatedEvent(
                                          self._current_timestamp,
